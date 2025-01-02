@@ -14,6 +14,7 @@ Like protobuf, redfield messages are encoded as Tag-Length(?)-Value. A 16-bit in
 |4|u64 or i64 or f64|
 |5|string, byte array, message, or list|
 |6|oneof|
+|7|void|
 
 Therefore, the maximum number of fields in a single message definition is `u16::MAX >> 3 = 8191`.
 
@@ -119,17 +120,40 @@ Lists are length-prefixed with their length in bytes, NOT the number of items pr
 #### JSON
 Lists are encoded as JSON arrays.
 
-### Optional Values
-An optional value may or may not be present.
+### Void
+`void` is a special type that represents the absence of a value, much like JSON's `null`.
+#### Redfield
+`void` contains no value; it is comprised only of a tag.
+#### JSON
+`void` is encoded as JSON `null`.
+
+### Optional Message Fields
+An optional message field may be omitted from the encoded form.
 ```
 message PaginatedResult {
-  data @0: []DataItem,
-  next_token @1: ?string, // final page reached when next_token is not present
+  data@0: []DataItem,
+  next_token@1?: string, // final page reached when next_token is not present
 }
 ```
 #### Redfield
-A value which is not present will not be included in the encoded form.
+If the value is not present, it will not be included in the encoded form. If it is present, it will be encoded as normal.
 #### JSON
-A value which is not present may be assigned the value `null` or may be missing from the encoded form.
+If the value if not present, the key and value will not be present in the JSON object. If it is, it will appear as normal.
+
+### Optional Types
+```
+message WeatherReport {
+  // each list item may be absent or present
+  hourly_temperature@0: []?i16,
+  // the value may be missing from the encoded form, and if it
+  // is present, each list item may be absent or present
+  hourly_feels_like_temperature?@1: []?i16, // the field 
+}
+```
+An optional type is implicitly a union with `void`: it may be encoded as a `void` or as the expected type.
+#### Redfield
+If the value is absent, it is encoded as `void`. If it is present, it is encoded as normal.
+#### JSON
+If the value is absent, it is encoded as a `null`. If it is present, it is encoded as normal.
 
 [^1](https://datatracker.ietf.org/doc/html/rfc4648#section-5)[https://datatracker.ietf.org/doc/html/rfc4648#section-5]

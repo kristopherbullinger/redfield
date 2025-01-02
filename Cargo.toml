@@ -3,4 +3,11 @@ name = "redfield"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+
+[[bin]]
+name = "redfield-test"
+
 [dependencies]
+compact_str = "0.8.1"
+smallvec = "1.13.2"
