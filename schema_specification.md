@@ -39,7 +39,7 @@ enum_body = "{" { ident "=" enum_variant_value ","} [ "UNKNOWN" "," ] "}"
 enum_variant_value = decimal_number | hex_number | binary_number
 
 oneof = "oneof" ident oneof_body
-oneof_body = "{" { enum | oneof | message } { oneof_field } "}"
+oneof_body = "{" { enum | oneof | message | oneof_field } "}"
 oneof_field = ident "@" field_number ":" type ","
 
 service = "service" ident "{" { procedure } "}"

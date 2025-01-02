@@ -121,7 +121,7 @@ Lists are length-prefixed with their length in bytes, NOT the number of items pr
 Lists are encoded as JSON arrays.
 
 ### Void
-`void` is a special type that represents the absence of a value, much like JSON's `null`.
+`void` is a special type that represents the absence of a value, much like JSON's `null`. It's not very interesting by itself, but may be used as a member of a `oneof`.
 #### Redfield
 `void` contains no value; it is comprised only of a tag.
 #### JSON
@@ -139,21 +139,5 @@ message PaginatedResult {
 If the value is not present, it will not be included in the encoded form. If it is present, it will be encoded as normal.
 #### JSON
 If the value if not present, the key and value will not be present in the JSON object. If it is, it will appear as normal.
-
-### Optional Types
-```
-message WeatherReport {
-  // each list item may be absent or present
-  hourly_temperature@0: []?i16,
-  // the value may be missing from the encoded form, and if it
-  // is present, each list item may be absent or present
-  hourly_feels_like_temperature?@1: []?i16, // the field 
-}
-```
-An optional type is implicitly a union with `void`: it may be encoded as a `void` or as the expected type.
-#### Redfield
-If the value is absent, it is encoded as `void`. If it is present, it is encoded as normal.
-#### JSON
-If the value is absent, it is encoded as a `null`. If it is present, it is encoded as normal.
 
 [^1](https://datatracker.ietf.org/doc/html/rfc4648#section-5)[https://datatracker.ietf.org/doc/html/rfc4648#section-5]

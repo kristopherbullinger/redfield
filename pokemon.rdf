@@ -1,4 +1,4 @@
-url = "https://blah.com/api/v1";
+base_url = "https://blah.com/api/v1";
 
 service Pokedex {
 	GET pokemon(PokemonInput) -> Pokemon;
@@ -19,20 +19,20 @@ message NewPokemonInput {
 	abilities @1 : []Ability,
 	hp @2: u16,
 	atk @3: u8,
-	cost @4: u8 = 1;
+	cost @4?: u8,
 	description @5: string,
-	weakness @6: ?Element,
+	weakness @6?: Element,
 	type @7: Element,
 }
 
 message Pokemon {
 	name @0: string,
-	abilities @1 : ?[]Ability,
+	abilities @1? : []Ability,
 	hp @2: u16,
 	atk @3: u8,
-	cost @4: u8 = 1;
+	cost @4: u8,
 	description @5: string,
-	weakness @6: ?Element,
+	weakness @6?: Element,
 	type @7: Element,
 }
 

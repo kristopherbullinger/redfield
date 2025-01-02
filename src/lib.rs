@@ -1,16 +1,12 @@
 use std::str::FromStr;
 
 use compact_str::CompactString;
-// use std::iter::Peekable;
 pub mod lexer;
 
 pub fn parse_document_from_str(inp: &str) -> Result<Document, ParseError> {
-    let mut iter = lexer::lex_document_iter(inp).peekable();
-    let iter_ref = iter.by_ref();
-    let mut peekable = iter_ref.peekable();
+    let mut iter = lexer::lex_document_iter(inp);
     let mut base_url = None;
-    // parse top-level identifiers: [ "base_url", ]
-    let Some(tok) = peekable.next() else {
+    let Some(tok) = iter.next() else {
         return Ok(Document {
             base_url: None,
             services: vec![],
@@ -18,109 +14,177 @@ pub fn parse_document_from_str(inp: &str) -> Result<Document, ParseError> {
         });
     };
 
-    let tok = tok?;
+    let mut tok = tok?;
     let mut definitions = vec![];
     let mut services = vec![];
-    match tok.type_ {
-        lexer::TokenType::Ident(ide) => {
-            if ide.as_str() == "base_url" {
-                base_url = Some(munch_base_url(peekable.by_ref())?);
-            } else {
-                return Err(ParseError::UnknownTopLevelIdent(ide.0));
+
+    // parse top-level identifiers
+    loop {
+        let line = iter.line;
+        let col = iter.col;
+        match tok.type_ {
+            lexer::TokenType::Ident(ide) => {
+                if ide.as_str() == "base_url" {
+                    base_url = Some(munch_base_url(&mut iter)?);
+                } else {
+                    return Err(parse_error(
+                        line,
+                        col,
+                        ParseErrorType::UnknownTopLevelIdent(ide.0),
+                    ));
+                }
+            }
+            _ => {
+                break;
             }
         }
-        mut token_type => loop {
-            match token_type {
-                lexer::TokenType::KeywordService => {
-                    let svc = munch_service(peekable.by_ref())?;
-                    services.push(svc);
-                }
-                lexer::TokenType::KeywordMessage => {
-                    let msg = munch_message(peekable.by_ref())?;
-                    definitions.push(Definition::Message(msg));
-                }
-                lexer::TokenType::KeywordEnum => {
-                    let enm = munch_enum(peekable.by_ref())?;
-                    definitions.push(Definition::Enum(enm));
-                }
-                lexer::TokenType::KeywordOneof => {
-                    let oneof = munch_oneof(peekable.by_ref())?;
-                    definitions.push(Definition::OneOf(oneof));
-                }
-                lexer::TokenType::Ident(i) => {
-                    return Err(ParseError::TopLevelIdentNotAtBeginningOfFile(i));
-                }
-                _ => {
-                    return Err(ParseError::ExpectedOneOf(vec![
-                        lexer::TokenType::KeywordService,
-                        lexer::TokenType::KeywordMessage,
-                        lexer::TokenType::KeywordEnum,
-                        lexer::TokenType::KeywordOneof,
-                    ]));
-                }
+        tok = match iter.next() {
+            Some(tok) => tok?,
+            None => {
+                return Ok(Document {
+                    base_url,
+                    services,
+                    definitions,
+                });
             }
-            token_type = match peekable.next() {
-                Some(tok) => tok?.type_,
-                None => break,
-            }
-        },
+        }
     }
-    Ok(Document {
-        base_url,
-        services,
-        definitions,
-    })
+    // parse the rest of the document
+    loop {
+        let line = iter.line;
+        let col = iter.col;
+        match tok.type_ {
+            lexer::TokenType::Ident(ide) => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::TopLevelIdentNotAtBeginningOfFile(ide),
+                ));
+            }
+            lexer::TokenType::KeywordService => {
+                let svc = munch_service(&mut iter)?;
+                services.push(svc);
+            }
+            lexer::TokenType::KeywordMessage => {
+                let msg = munch_message(&mut iter)?;
+                definitions.push(Definition::Message(msg));
+            }
+            lexer::TokenType::KeywordEnum => {
+                let enm = munch_enum(&mut iter)?;
+                definitions.push(Definition::Enum(enm));
+            }
+            lexer::TokenType::KeywordOneof => {
+                let oneof = munch_oneof(&mut iter)?;
+                definitions.push(Definition::OneOf(oneof));
+            }
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedServiceMessageEnumOrOneof,
+                ));
+            }
+        }
+        tok = match iter.next() {
+            Some(tok) => tok?,
+            None => {
+                return Ok(Document {
+                    base_url,
+                    services,
+                    definitions,
+                });
+            }
+        }
+    }
 }
 
-fn munch_literal_string(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<CompactString, ParseError> {
-    match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-        lexer::TokenType::Literal(lexer::Literal::String(s)) => Ok(s.0),
-        _ => Err(ParseError::ExpectedStringLiteral),
+fn parse_error(line: usize, col: usize, type_: ParseErrorType) -> ParseError {
+    ParseError { line, col, type_ }
+}
+
+fn next_not_eof(iter: &mut lexer::TokenIter<'_>) -> Result<lexer::Token, ParseError> {
+    match iter.next() {
+        Some(tok) => Ok(tok?),
+        None => Err(ParseError {
+            line: iter.line,
+            col: iter.col,
+            type_: ParseErrorType::UnexpectedEof,
+        }),
     }
 }
+
+fn munch_literal_string(iter: &mut lexer::TokenIter<'_>) -> Result<CompactString, ParseError> {
+    match next_not_eof(iter)?.type_ {
+        lexer::TokenType::Literal(lexer::Literal::String(s)) => Ok(s.0),
+        _ => Err(parse_error(
+            iter.line,
+            iter.col,
+            ParseErrorType::ExpectedStringLiteral,
+        )),
+    }
+}
+
 // assumes ident "base_url" already chomped
 // looking for "=" string ";"
-fn munch_base_url(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<CompactString, ParseError> {
-    expect_next_equals(iter.by_ref(), lexer::TokenType::Equals)?;
-    let base_url = munch_literal_string(iter.by_ref())?;
-    expect_next_equals(iter.by_ref(), lexer::TokenType::Semicolon)?;
+fn munch_base_url(iter: &mut lexer::TokenIter<'_>) -> Result<CompactString, ParseError> {
+    expect_next_equals(&mut *iter, lexer::TokenType::Equals)?;
+    let base_url = munch_literal_string(&mut *iter)?;
+    expect_next_equals(&mut *iter, lexer::TokenType::Semicolon)?;
     Ok(base_url)
 }
 
 // assumes "service" keyword already chomped
-fn munch_service(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<Service, ParseError> {
-    let name = munch_ident(iter.by_ref())?;
-    expect_next_equals(iter.by_ref(), lexer::TokenType::LCurly)?;
+fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<Service, ParseError> {
+    let name = munch_ident(&mut *iter)?;
+    expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
     let mut procedures = vec![];
     loop {
-        let tok = iter.next().ok_or(ParseError::UnexpectedEof)??;
+        let tok = next_not_eof(iter)?;
         let verb = match tok.type_ {
             lexer::TokenType::Verb(v) => v,
             lexer::TokenType::RCurly => return Ok(Service { name, procedures }),
-            _ => return Err(ParseError::ExpectedProcedureVerb),
+            _ => {
+                return Err(parse_error(
+                    iter.line,
+                    iter.col,
+                    ParseErrorType::ExpectedProcedureVerb,
+                ))
+            }
         };
-        let name = munch_ident(iter.by_ref())?;
-        expect_next_equals(iter.by_ref(), lexer::TokenType::LParen)?;
-        let input = match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
+        let name = munch_ident(&mut *iter)?;
+        expect_next_equals(&mut *iter, lexer::TokenType::LParen)?;
+        let line = iter.line;
+        let col = iter.col;
+        let tok = next_not_eof(iter)?;
+        let input = match tok.type_ {
             lexer::TokenType::RParen => None,
             lexer::TokenType::Ident(i) => {
-                expect_next_equals(iter.by_ref(), lexer::TokenType::RParen)?;
+                expect_next_equals(&mut *iter, lexer::TokenType::RParen)?;
                 Some(i)
             }
-            _ => return Err(ParseError::ExpectedRParenOrIdent),
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedIdentOrRParen,
+                ))
+            }
         };
-        let output = match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
+        let line = iter.line;
+        let col = iter.col;
+        let tok = next_not_eof(iter)?;
+        let output = match tok.type_ {
             lexer::TokenType::Semicolon => None,
-            lexer::TokenType::Arrow => Some(munch_ident(iter.by_ref())?),
-            _ => return Err(ParseError::ExpectedIdentOrSemicolon),
+            lexer::TokenType::Arrow => Some(munch_ident(&mut *iter)?),
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedIdentOrSemicolon,
+                ))
+            }
         };
-        expect_next_equals(iter.by_ref(), lexer::TokenType::Semicolon)?;
+        expect_next_equals(&mut *iter, lexer::TokenType::Semicolon)?;
         procedures.push(Procedure {
             verb,
             name,
@@ -129,22 +193,38 @@ fn munch_service(
         });
     }
 }
-fn munch_list_size(
-    _iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<Option<usize>, ParseError> {
-    todo!()
+
+// assumes "[" already munched
+fn munch_list_size(iter: &mut lexer::TokenIter<'_>) -> Result<Option<usize>, ParseError> {
+    let line = iter.line;
+    let col = iter.col;
+    let tok = next_not_eof(iter)?;
+    match tok.type_ {
+        lexer::TokenType::RBracket => Ok(None),
+        lexer::TokenType::Literal(lexer::Literal::DecimalNumber(d)) => {
+            let sz = d
+                .as_str()
+                .parse()
+                .map_err(|_| parse_error(line, col, ParseErrorType::IntegerParseError))?;
+            expect_next_equals(iter, lexer::TokenType::RBracket)?;
+            Ok(Some(sz))
+        }
+        _ => Err(parse_error(
+            line,
+            col,
+            ParseErrorType::ExpectedRBracketOrNumber,
+        )),
+    }
 }
 
-fn munch_type_(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<Type_, ParseError> {
+fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
     let mut arena = smallvec::SmallVec::<[TypeNode; 4]>::new();
+    let line = iter.line;
+    let col = iter.col;
     loop {
-        let tok = iter.next().ok_or(ParseError::UnexpectedEof)??;
+        let tok = next_not_eof(iter)?;
         match tok.type_ {
-            lexer::TokenType::LBracket => {
-                arena.push(TypeNode::List(munch_list_size(iter.by_ref())?))
-            }
+            lexer::TokenType::LBracket => arena.push(TypeNode::List(munch_list_size(&mut *iter)?)),
             lexer::TokenType::Ident(i) => {
                 arena.push(TypeNode::TypeOrIdent(TypeOrIdent::Ident(i)));
                 break;
@@ -153,59 +233,81 @@ fn munch_type_(
                 arena.push(TypeNode::TypeOrIdent(TypeOrIdent::Type(t)));
                 break;
             }
-            _ => return Err(ParseError::ExpectedBracketTypeOrIdent),
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedLBracketTypeOrIdent,
+                ))
+            }
         }
     }
-    Ok(Type_ { arena })
+    Ok(Type { arena })
 }
 
-fn munch_decimal_number<T: FromStr>(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<T, ParseError> {
-    let tok = iter.next().ok_or(ParseError::UnexpectedEof)??;
+fn munch_decimal_number<T: FromStr>(iter: &mut lexer::TokenIter<'_>) -> Result<T, ParseError> {
+    let line = iter.line;
+    let col = iter.col;
+    let tok = next_not_eof(iter)?;
     match tok.type_ {
         lexer::TokenType::Literal(lexer::Literal::DecimalNumber(d)) => d
             .as_str()
             .parse()
-            .map_err(|_| ParseError::IntegerParseError),
-        _ => return Err(ParseError::ExpectedIntegerLiteral),
+            .map_err(|_| parse_error(line, col, ParseErrorType::IntegerParseError)),
+        _ => {
+            return Err(parse_error(
+                line,
+                col,
+                ParseErrorType::ExpectedIntegerLiteral,
+            ))
+        }
     }
 }
 
 // assumes "message" keyword already chomped
-fn munch_message(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<Message, ParseError> {
-    let _name = munch_ident(iter.by_ref())?;
+fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError> {
+    let name = munch_ident(&mut *iter)?.0;
     let mut definitions = vec![];
     let mut fields = vec![];
-    expect_next_equals(iter.by_ref(), lexer::TokenType::LCurly)?;
+    expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
     loop {
-        match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
+        let line = iter.line;
+        let col = iter.col;
+        let tok = next_not_eof(iter)?;
+        match tok.type_ {
             lexer::TokenType::KeywordEnum => {
-                definitions.push(Definition::Enum(munch_enum(iter.by_ref())?))
+                definitions.push(Definition::Enum(munch_enum(&mut *iter)?))
             }
             lexer::TokenType::KeywordOneof => {
-                definitions.push(Definition::OneOf(munch_oneof(iter.by_ref())?))
+                definitions.push(Definition::OneOf(munch_oneof(&mut *iter)?))
             }
             lexer::TokenType::KeywordMessage => {
-                definitions.push(Definition::Message(munch_message(iter.by_ref())?))
+                definitions.push(Definition::Message(munch_message(&mut *iter)?))
             }
             lexer::TokenType::Ident(name) => {
                 // ident@4?:
-                expect_next_equals(iter.by_ref(), lexer::TokenType::AtSign)?;
-                let field_number = munch_decimal_number(iter.by_ref())?;
+                expect_next_equals(&mut *iter, lexer::TokenType::AtSign)?;
+                let field_number = munch_decimal_number(&mut *iter)?;
                 let mut optional = false;
-                match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
+                let line = iter.line;
+                let col = iter.col;
+                let tok = next_not_eof(iter)?;
+                match tok.type_ {
                     lexer::TokenType::QuestionMark => {
                         optional = true;
-                        expect_next_equals(iter.by_ref(), lexer::TokenType::Colon)?;
+                        expect_next_equals(&mut *iter, lexer::TokenType::Colon)?;
                     }
                     lexer::TokenType::Colon => {}
-                    _ => return Err(ParseError::ExpectedColonOrQuestionMark),
+                    _ => {
+                        return Err(parse_error(
+                            line,
+                            col,
+                            ParseErrorType::ExpectedColonOrQuestionMark,
+                        ))
+                    }
                 }
-                let type_ = munch_type_(iter.by_ref())?;
-                expect_next_equals(iter.by_ref(), lexer::TokenType::Comma)?;
+                let type_ = munch_type(&mut *iter)?;
+                expect_next_equals(&mut *iter, lexer::TokenType::Comma)?;
                 fields.push(MessageField {
                     field_number,
                     optional,
@@ -215,198 +317,109 @@ fn munch_message(
             }
             lexer::TokenType::RCurly => {
                 return Ok(Message {
+                    name,
                     definitions,
                     fields,
                 });
             }
-            _ => return Err(ParseError::ExpectedEnumMessageOneOfOrIdent),
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedEnumMessageOneOfOrIdent,
+                ))
+            }
         }
     }
 }
 
-// fn munch_type(
-//     mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-// ) -> Result<Type, ParseError> {
-//     Ok(match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//         lexer::TokenType::QuestionMark => {
-//             // ?
-//             match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//                 lexer::TokenType::LBracket => {
-//                     match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//                         // ?[
-//                         lexer::TokenType::Literal(lexer::Literal::DecimalNumber(n)) => {
-//                             // ?[3
-//                             let sz = n
-//                                 .as_str()
-//                                 .parse::<usize>()
-//                                 .map_err(|_| ParseError::IntegerParseError)?;
-//                             expect_next_equals(iter.by_ref(), lexer::TokenType::RBracket)?;
-//                             match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//                                 lexer::TokenType::Ident(i) => Type {
-//                                     optional: true,
-//                                     list_size: Some(ListSize::Sized(sz)),
-//                                     type_or_ident: TypeOrIdent::Ident(i),
-//                                 }, // ?[3]MyType
-//                                 lexer::TokenType::BaseType(t) => Type {
-//                                     optional: true,
-//                                     list_size: Some(ListSize::Sized(sz)),
-//                                     type_or_ident: TypeOrIdent::Type(t),
-//                                 }, // ?[3]u16
-//                                 _ => return Err(ParseError::ExpectedTypeOrIdent),
-//                             }
-//                         }
-//                         lexer::TokenType::RBracket => {
-//                             // ?[]
-//                             match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//                                 lexer::TokenType::Ident(i) => Type {
-//                                     optional: true,
-//                                     list_size: Some(ListSize::Unsized),
-//                                     type_or_ident: TypeOrIdent::Ident(i),
-//                                 }, // ?[]MyType
-//                                 lexer::TokenType::BaseType(t) => Type {
-//                                     optional: true,
-//                                     list_size: Some(ListSize::Unsized),
-//                                     type_or_ident: TypeOrIdent::Type(t),
-//                                 }, // ?[]u16
-//                                 _ => return Err(ParseError::ExpectedTypeOrIdent),
-//                             }
-//                         }
-//                         _ => return Err(ParseError::ExpectedRBracketOrNumber),
-//                     }
-//                 } // ?[
-//                 lexer::TokenType::Ident(i) => Type {
-//                     optional: true,
-//                     list_size: None,
-//                     type_or_ident: TypeOrIdent::Ident(i),
-//                 }, // ?MyType
-//                 lexer::TokenType::BaseType(t) => Type {
-//                     optional: true,
-//                     list_size: None,
-//                     type_or_ident: TypeOrIdent::Type(t),
-//                 }, // ?u16
-//                 _ => return Err(ParseError::ExpectedBracketTypeOrIdent),
-//             }
-//         }
-//         lexer::TokenType::LBracket => match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//             // [
-//             lexer::TokenType::Literal(lexer::Literal::DecimalNumber(n)) => {
-//                 // [3
-//                 let sz = n
-//                     .as_str()
-//                     .parse::<usize>()
-//                     .map_err(|_| ParseError::IntegerParseError)?;
-//                 expect_next_equals(iter.by_ref(), lexer::TokenType::RBracket)?;
-//                 match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//                     lexer::TokenType::Ident(i) => Type {
-//                         optional: false,
-//                         list_size: Some(ListSize::Sized(sz)),
-//                         type_or_ident: TypeOrIdent::Ident(i),
-//                     }, // [3]MyType
-//                     lexer::TokenType::BaseType(t) => Type {
-//                         optional: false,
-//                         list_size: Some(ListSize::Sized(sz)),
-//                         type_or_ident: TypeOrIdent::Type(t),
-//                     }, // [3]u16
-//                     _ => return Err(ParseError::ExpectedTypeOrIdent),
-//                 }
-//             }
-//             lexer::TokenType::RBracket => {
-//                 // []
-//                 match iter.next().ok_or(ParseError::UnexpectedEof)??.type_ {
-//                     lexer::TokenType::Ident(i) => Type {
-//                         optional: false,
-//                         list_size: Some(ListSize::Unsized),
-//                         type_or_ident: TypeOrIdent::Ident(i),
-//                     }, // []MyType
-//                     lexer::TokenType::BaseType(t) => Type {
-//                         optional: false,
-//                         list_size: Some(ListSize::Unsized),
-//                         type_or_ident: TypeOrIdent::Type(t),
-//                     }, // []u16
-//                     _ => return Err(ParseError::ExpectedTypeOrIdent),
-//                 }
-//             }
-//             _ => return Err(ParseError::ExpectedRBracketOrNumber),
-//         },
-//         lexer::TokenType::Ident(i) => Type {
-//             optional: false,
-//             list_size: None,
-//             type_or_ident: TypeOrIdent::Ident(i),
-//         }, // MyType
-//         lexer::TokenType::BaseType(t) => Type {
-//             optional: false,
-//             list_size: None,
-//             type_or_ident: TypeOrIdent::Type(t),
-//         }, // u16
-//         _ => return Err(ParseError::ExpectedQuestionMarkBracketTypeOrIdent),
-//     })
-// }
-
-fn munch_ident(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<Ident, ParseError> {
-    let tok = iter.next().ok_or(ParseError::UnexpectedEof)?;
-    match tok?.type_ {
+fn munch_ident(iter: &mut lexer::TokenIter<'_>) -> Result<Ident, ParseError> {
+    let line = iter.line;
+    let col = iter.col;
+    let tok = next_not_eof(iter)?;
+    match tok.type_ {
         lexer::TokenType::Ident(i) => Ok(i),
         _ => {
-            return Err(ParseError::ExpectedIdent);
+            return Err(parse_error(line, col, ParseErrorType::ExpectedIdent));
         }
     }
 }
 
 // assumed "enum" keyword already chomped
-fn munch_enum(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<Enum, ParseError> {
+fn munch_enum(iter: &mut lexer::TokenIter<'_>) -> Result<Enum, ParseError> {
     // munch ident
-    let name = munch_ident(iter.by_ref())?;
+    let name = munch_ident(&mut *iter)?;
     // munch "{"
-    expect_next_equals(iter.by_ref(), lexer::TokenType::LCurly)?;
+    expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
     // munch { variant } [ "UNKNOWN" ] "}"
     let mut variants: Vec<EnumVariant> = vec![];
     let mut has_unknown = false;
     loop {
-        let tok = iter.next().ok_or(ParseError::UnexpectedEof)?;
-        match tok?.type_ {
+        let line = iter.line;
+        let col = iter.col;
+        let tok = next_not_eof(iter)?;
+        match tok.type_ {
             lexer::TokenType::Ident(name) => {
                 if name.as_str() == "UNKNOWN" {
                     if has_unknown {
-                        return Err(ParseError::DuplicatedEnumVariantUnknown);
+                        return Err(parse_error(
+                            line,
+                            col,
+                            ParseErrorType::DuplicatedEnumVariantUnknown,
+                        ));
                     }
                     has_unknown = true;
                 } else {
                     if has_unknown {
-                        return Err(ParseError::EnumVariantUnknownNotLast);
+                        return Err(parse_error(
+                            line,
+                            col,
+                            ParseErrorType::EnumVariantUnknownNotLast,
+                        ));
                     } else {
-                        expect_next_equals(iter.by_ref(), lexer::TokenType::Equals)?;
-                        let tok = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                        let value = match tok?.type_ {
+                        expect_next_equals(&mut *iter, lexer::TokenType::Equals)?;
+                        let line = iter.line;
+                        let col = iter.col;
+                        let tok = next_not_eof(iter)?;
+                        let value = match tok.type_ {
                             lexer::TokenType::Literal(lit) => match lit {
-                                lexer::Literal::DecimalNumber(n) => n
-                                    .as_str()
-                                    .parse::<u16>()
-                                    .map_err(|_| ParseError::IntegerParseError)?,
+                                lexer::Literal::DecimalNumber(n) => {
+                                    n.as_str().parse::<u16>().map_err(|_| {
+                                        parse_error(line, col, ParseErrorType::IntegerParseError)
+                                    })?
+                                }
                                 lexer::Literal::BinaryNumber(n) => {
-                                    u16::from_str_radix(n.as_str(), 2)
-                                        .map_err(|_| ParseError::IntegerParseError)?
+                                    u16::from_str_radix(n.as_str(), 2).map_err(|_| {
+                                        parse_error(line, col, ParseErrorType::IntegerParseError)
+                                    })?
                                 }
                                 lexer::Literal::HexNumber(n) => u16::from_str_radix(n.as_str(), 16)
-                                    .map_err(|_| ParseError::IntegerParseError)?,
+                                    .map_err(|_| {
+                                        parse_error(line, col, ParseErrorType::IntegerParseError)
+                                    })?,
                                 lexer::Literal::Float(_)
                                 | lexer::Literal::String(_)
                                 | lexer::Literal::EnumVariant(_)
                                 | lexer::Literal::Bool(_) => {
-                                    return Err(ParseError::ExpectedIntegerLiteral);
+                                    return Err(parse_error(
+                                        line,
+                                        col,
+                                        ParseErrorType::ExpectedIntegerLiteral,
+                                    ));
                                 }
                             },
                             _ => {
-                                return Err(ParseError::ExpectedIntegerLiteral);
+                                return Err(parse_error(
+                                    line,
+                                    col,
+                                    ParseErrorType::ExpectedIntegerLiteral,
+                                ));
                             }
                         };
                         variants.push(EnumVariant { name, value });
                     };
                 }
-                expect_next_equals(iter.by_ref(), lexer::TokenType::Comma)?;
+                expect_next_equals(&mut *iter, lexer::TokenType::Comma)?;
             }
             lexer::TokenType::RCurly => {
                 return Ok(Enum {
@@ -415,51 +428,112 @@ fn munch_enum(
                     has_unknown,
                 });
             }
-            _ => return Err(ParseError::ExpectedIdentOrRCurly),
-        }
-    }
-}
-
-// assumes "oneof" keyword already chomped
-fn munch_oneof(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-) -> Result<OneOf, ParseError> {
-    let _name = munch_ident(iter.by_ref())?;
-    expect_next_equals(iter.by_ref(), lexer::TokenType::LCurly)?;
-    let _definitions: Vec<Definition> = vec![];
-    let _variants: Vec<OneOfVariant> = vec![];
-    loop {
-        let _tok = iter.next().ok_or(ParseError::UnexpectedEof)?;
-    }
-}
-
-// error if eof or next token not equal to input
-fn expect_next_equals(
-    mut iter: impl Iterator<Item = Result<lexer::Token, lexer::ParseError>>,
-    type_: lexer::TokenType,
-) -> Result<(), ParseError> {
-    match iter.next() {
-        None => Err(ParseError::Expected(type_)),
-        Some(tok) => {
-            if tok?.type_ == type_ {
-                Ok(())
-            } else {
-                Err(ParseError::Expected(type_))
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedIdentOrRCurly,
+                ))
             }
         }
     }
 }
 
+// assumes "oneof" keyword already chomped
+fn munch_oneof(iter: &mut lexer::TokenIter<'_>) -> Result<OneOf, ParseError> {
+    let name = munch_ident(&mut *iter)?.0;
+    expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
+    let mut definitions: Vec<Definition> = vec![];
+    let mut variants: Vec<OneOfVariant> = vec![];
+    loop {
+        let line = iter.line;
+        let col = iter.col;
+        let tok = next_not_eof(iter)?;
+        match tok.type_ {
+            lexer::TokenType::RCurly => {
+                return Ok(OneOf {
+                    name,
+                    definitions,
+                    variants,
+                })
+            }
+            lexer::TokenType::KeywordEnum => {
+                let enm = munch_enum(iter)?;
+                definitions.push(Definition::Enum(enm));
+            }
+            lexer::TokenType::KeywordOneof => {
+                let oneof = munch_oneof(iter)?;
+                definitions.push(Definition::OneOf(oneof));
+            }
+            lexer::TokenType::KeywordMessage => {
+                let msg = munch_message(iter)?;
+                definitions.push(Definition::Message(msg));
+            }
+            lexer::TokenType::Ident(i) => {
+                let field_name = i.0;
+                expect_next_equals(iter, lexer::TokenType::AtSign)?;
+                let field_number = munch_decimal_number(iter)?;
+                expect_next_equals(iter, lexer::TokenType::Colon)?;
+                let type_ = munch_type(iter)?;
+                expect_next_equals(iter, lexer::TokenType::Comma)?;
+                variants.push(OneOfVariant {
+                    field_name,
+                    field_number,
+                    type_,
+                });
+            }
+            _ => {
+                return Err(parse_error(
+                    line,
+                    col,
+                    ParseErrorType::ExpectedEnumMessageOneOfOrIdent,
+                ))
+            }
+        }
+    }
+}
+
+// error if eof or next token not equal to input
+fn expect_next_equals(
+    iter: &mut lexer::TokenIter<'_>,
+    type_: lexer::TokenType,
+) -> Result<(), ParseError> {
+    let line = iter.line;
+    let col = iter.col;
+    let tok = next_not_eof(iter)?;
+    if tok.type_ == type_ {
+        Ok(())
+    } else {
+        Err(parse_error(line, col, ParseErrorType::Expected(type_)))
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
-enum ParseError {
+pub struct ParseError {
+    line: usize,
+    col: usize,
+    type_: ParseErrorType,
+}
+
+impl From<lexer::ParseError> for ParseError {
+    fn from(e: lexer::ParseError) -> ParseError {
+        ParseError {
+            line: e.line,
+            col: e.col,
+            type_: ParseErrorType::InvalidSyntax(e.type_),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseErrorType {
     ExpectedTypeOrIdent,
     ExpectedColonOrQuestionMark,
     ExpectedAtSignOrQuestionMark,
-    InvalidSyntax(lexer::ParseError),
+    InvalidSyntax(lexer::ParseErrorType),
     ExpectedRBracketOrNumber,
     DuplicateBaseUrl,
-    ExpectedBracketTypeOrIdent,
-    ExpectedQuestionMarkBracketTypeOrIdent,
+    ExpectedLBracketTypeOrIdent,
     ExpectedEnumMessageOneOfOrIdent,
     TopLevelIdentNotAtBeginningOfFile(Ident),
     UnknownTopLevelIdent(CompactString),
@@ -468,24 +542,88 @@ enum ParseError {
     EnumVariantUnknownNotLast,
     Expected(lexer::TokenType),
     ExpectedIdent,
-    ExpectedRParenOrIdent,
+    ExpectedIdentOrRParen,
     ExpectedIdentOrSemicolon,
     ExpectedProcedureVerb,
-    ExpectedDecimalIntegerLiteral,
     ExpectedArrowOrSemicolon,
     ExpectedStringLiteral,
     ExpectedIdentOrRCurly,
-    ExpectedOneOf(Vec<lexer::TokenType>),
+    ExpectedServiceMessageEnumOrOneof,
     ExpectedIntegerLiteral,
     CustomMessage(CompactString),
     UnexpectedEof,
 }
 
-impl From<lexer::ParseError> for ParseError {
-    fn from(e: lexer::ParseError) -> ParseError {
-        ParseError::InvalidSyntax(e)
+impl std::error::Error for ParseError {}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Failed to parse document:\n")?;
+        write!(f, "line: {}\n", self.line + 1)?;
+        write!(f, " col: {}\n", self.col + 1)?;
+        match self.type_ {
+            ParseErrorType::ExpectedTypeOrIdent => write!(f, "expected type or identifier")?,
+            ParseErrorType::ExpectedColonOrQuestionMark => write!(f, "expected `:` or `?`")?,
+            ParseErrorType::ExpectedAtSignOrQuestionMark => write!(f, "expected `@` or `?`")?,
+            ParseErrorType::InvalidSyntax(ref e) => match e {
+                lexer::ParseErrorType::UnexpectedEof => write!(f, "unexpected end of input")?,
+                lexer::ParseErrorType::UnknownValue => write!(f, "unknown token")?,
+                lexer::ParseErrorType::ParseLiteral(_) => {
+                    write!(f, "failed to parse value literal")?
+                }
+            },
+            ParseErrorType::ExpectedRBracketOrNumber => write!(f, "expected `]` or number")?,
+            ParseErrorType::DuplicateBaseUrl => write!(f, "`base_url` must appear a single time")?,
+            ParseErrorType::ExpectedLBracketTypeOrIdent => {
+                write!(f, "expected `[`, type, or identifier")?
+            }
+            ParseErrorType::ExpectedEnumMessageOneOfOrIdent => write!(
+                f,
+                "expected keyword `enum`, keyword `message`, keyword `oneof`, or identifier"
+            )?,
+            ParseErrorType::TopLevelIdentNotAtBeginningOfFile(ref i) => write!(
+                f,
+                "top-level identifiers must appear at the top of the file; identifier `{}`",
+                i.0,
+            )?,
+            ParseErrorType::UnknownTopLevelIdent(ref i) => {
+                write!(f, "unknown or unsupported top-level identifier: {}", i)?
+            }
+            ParseErrorType::DuplicatedEnumVariantUnknown => {
+                write!(f, "special `UNKNOWN` enum variant must appear only once")?
+            }
+            ParseErrorType::IntegerParseError => write!(f, "failed to parse integer")?,
+            ParseErrorType::EnumVariantUnknownNotLast => {
+                write!(f, "special `UNKNOWN` enum variant must appear last")?
+            }
+            ParseErrorType::Expected(ref tok) => write!(f, "expected {}", tok.debug_str())?,
+            ParseErrorType::ExpectedIdent => write!(f, "expected an identifier")?,
+            ParseErrorType::ExpectedIdentOrRParen => write!(f, "expected an identifier or `)`")?,
+            ParseErrorType::ExpectedIdentOrSemicolon => write!(f, "expected identifier or `;`")?,
+            ParseErrorType::ExpectedProcedureVerb => {
+                write!(f, "expected a procedure verb `GET` or `POST`")?
+            }
+            ParseErrorType::ExpectedArrowOrSemicolon => write!(f, "expected `->` or `;`")?,
+            ParseErrorType::ExpectedStringLiteral => write!(f, "expected a string literal")?,
+            ParseErrorType::ExpectedIdentOrRCurly => write!(f, "expected identifier or `{{`")?,
+            ParseErrorType::ExpectedServiceMessageEnumOrOneof => write!(
+                f,
+                "expected keyword `enum`, `oneof`, `message`, or`service`"
+            )?,
+            ParseErrorType::ExpectedIntegerLiteral => write!(f, "expected an integer literal")?,
+            ParseErrorType::CustomMessage(ref s) => write!(f, "{}", s)?,
+            ParseErrorType::UnexpectedEof => write!(f, "unexpected end of input")?,
+        }
+        Ok(())
     }
 }
+
+// impl From<lexer::ParseError> for ParseError {
+//     fn from(e: lexer::ParseError) -> ParseError {
+//         ParseError::InvalidSyntax(e)
+//     }
+// }
+
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct Document {
     base_url: Option<CompactString>,
@@ -549,6 +687,7 @@ pub struct EnumVariant {
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct OneOf {
+    pub name: CompactString,
     pub definitions: Vec<Definition>,
     pub variants: Vec<OneOfVariant>,
 }
@@ -579,22 +718,8 @@ pub enum TypeNode {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Type_ {
-    arena: smallvec::SmallVec<[TypeNode; 4]>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
 pub struct Type {
-    optional: bool,
-    // None indicates not a list
-    list_size: Option<ListSize>,
-    type_or_ident: TypeOrIdent,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ListSize {
-    Sized(usize),
-    Unsized,
+    arena: smallvec::SmallVec<[TypeNode; 4]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Copy, Debug)]
@@ -617,6 +742,7 @@ pub enum BaseType {
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct Message {
+    pub name: CompactString,
     pub definitions: Vec<Definition>,
     pub fields: Vec<MessageField>,
 }
@@ -624,15 +750,7 @@ pub struct Message {
 #[derive(Debug, PartialEq, Eq)]
 pub struct MessageField {
     pub field_number: u16,
-    pub type_: Type_,
+    pub type_: Type,
     pub name: Ident,
     pub optional: bool,
-    // TODO: allow setting default values in the schema?
-    // pub default_value: Option<CompactString>,
 }
-
-// impl MessageField {
-//     pub fn default_value(&self) -> Option<&str> {
-//         self.default_value.as_deref()
-//     }
-// }

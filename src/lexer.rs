@@ -37,6 +37,43 @@ pub enum TokenType {
     Eof,
 }
 
+impl TokenType {
+    pub(crate) fn debug_str(&self) -> &'static str {
+        match *self {
+            TokenType::LParen => "`(`",
+            TokenType::RParen => "`)`",
+            TokenType::LBracket => "`[`",
+            TokenType::RBracket => "`]`",
+            TokenType::LCurly => "`{`",
+            TokenType::RCurly => "`}`",
+            TokenType::QuestionMark => "`?`",
+            TokenType::Comma => "`,`",
+            TokenType::Colon => "`:`",
+            TokenType::Semicolon => "`;`",
+            TokenType::Equals => "`=`",
+            TokenType::Comment(_) => "a comment",
+            TokenType::Whitespace(_) => "whitespace",
+            TokenType::Ident(_) => "an identifier",
+            TokenType::BaseType(_) => "a type",
+            TokenType::KeywordEnum => "keyword `enum`",
+            TokenType::KeywordMessage => "keyword `message`",
+            TokenType::KeywordOneof => "keyword `oneof`",
+            TokenType::KeywordService => "keyword `service`",
+            TokenType::KeywordVoid => "keyword `void`",
+            TokenType::AtSign => "`@`",
+            TokenType::Verb(ref vb) => match vb {
+                crate::Verb::Get => "keyword `GET`",
+                crate::Verb::Post => "keyword `POST`",
+            },
+            TokenType::True => "keyword `true`",
+            TokenType::False => "keyword `false`",
+            TokenType::Arrow => "`->`",
+            TokenType::Literal(_) => "a value literal",
+            TokenType::Eof => "end of input",
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct EnumVariant {
     content: CompactString,
@@ -324,20 +361,18 @@ pub fn lex_document(inp: &str) -> Result<Vec<Token>, ParseError> {
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
-struct TokenIter<'s> {
-    inp: &'s str,
-    c: usize,
-    line: usize,
-    eof: Option<()>,
+pub(crate) struct TokenIter<'s> {
+    pub(crate) inp: &'s str,
+    pub(crate) col: usize,
+    pub(crate) line: usize,
 }
 
 impl<'s> TokenIter<'s> {
     fn new(inp: &'s str) -> TokenIter<'s> {
         TokenIter {
             inp,
-            c: 0,
+            col: 0,
             line: 0,
-            eof: Some(()),
         }
     }
 
@@ -346,98 +381,101 @@ impl<'s> TokenIter<'s> {
             match *self.inp.as_bytes() {
                 [] => break,
                 [b, ..] => {
-                    // keywords
                     match b {
                         b'\n' => {
                             self.line += 1;
-                            self.c = 0;
+                            self.col = 0;
                             self.inp = &self.inp[1..];
                             continue;
                         }
                         b'(' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::LParen);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::LParen);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b')' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::RParen);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::RParen);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b'{' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::LCurly);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::LCurly);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b'}' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::RCurly);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::RCurly);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b'[' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::LBracket);
-                            self.c += 1;
+                            let tok =
+                                token(self.line, (self.col, self.col + 1), TokenType::LBracket);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b']' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::RBracket);
-                            self.c += 1;
+                            let tok =
+                                token(self.line, (self.col, self.col + 1), TokenType::RBracket);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b'?' => {
                             let tok =
-                                token(self.line, (self.c, self.c + 1), TokenType::QuestionMark);
-                            self.c += 1;
+                                token(self.line, (self.col, self.col + 1), TokenType::QuestionMark);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b',' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::Comma);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::Comma);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b':' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::Colon);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::Colon);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b';' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::Semicolon);
-                            self.c += 1;
+                            let tok =
+                                token(self.line, (self.col, self.col + 1), TokenType::Semicolon);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b'=' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::Equals);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::Equals);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         b'@' => {
-                            let tok = token(self.line, (self.c, self.c + 1), TokenType::AtSign);
-                            self.c += 1;
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::AtSign);
+                            self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
                         _ => {
                             // munch whitespace
                             if is_whitespace(b) {
-                                self.c += 1;
+                                self.col += 1;
                                 self.inp = &self.inp[1..];
                                 continue;
                             }
                             // ->
                             if let Some(rest) = self.inp.strip_prefix("->") {
-                                let tok = token(self.line, (self.c, self.c + 2), TokenType::Arrow);
-                                self.c += 2;
+                                let tok =
+                                    token(self.line, (self.col, self.col + 2), TokenType::Arrow);
+                                self.col += 2;
                                 self.inp = rest;
                                 return Some(Ok(tok));
                             }
@@ -446,7 +484,7 @@ impl<'s> TokenIter<'s> {
                             if self.inp.starts_with("//") {
                                 self.inp = take_until_byte(self.inp, b'\n');
                                 self.line += 1;
-                                self.c = 0;
+                                self.col = 0;
                                 continue;
                             }
                             // eat enum variant
@@ -465,19 +503,19 @@ impl<'s> TokenIter<'s> {
                                 let tok = if let Some((_, tok)) =
                                     BASE_TYPES_TOKENS.iter().find(|tup| tup.0 == ide)
                                 {
-                                    token(self.line, (self.c, self.c + ide.len()), tok.clone())
+                                    token(self.line, (self.col, self.col + ide.len()), tok.clone())
                                 } else if let Some((_, tok)) =
                                     KEYWORDS_TOKENS.iter().find(|tup| tup.0 == ide)
                                 {
-                                    token(self.line, (self.c, self.c + ide.len()), tok.clone())
+                                    token(self.line, (self.col, self.col + ide.len()), tok.clone())
                                 } else {
                                     token(
                                         self.line,
-                                        (self.c, self.c + ide.len()),
+                                        (self.col, self.col + ide.len()),
                                         TokenType::Ident(crate::Ident(ide.into())),
                                     )
                                 };
-                                self.c += ide.len();
+                                self.col += ide.len();
                                 self.inp = rest;
                                 return Some(Ok(tok));
                             }
@@ -487,11 +525,11 @@ impl<'s> TokenIter<'s> {
                                     let token_len = self.inp.len() - rest.len();
                                     let tok = token(
                                         self.line,
-                                        (self.c, self.c + token_len),
+                                        (self.col, self.col + token_len),
                                         TokenType::Literal(lit),
                                     );
                                     self.inp = rest;
-                                    self.c += token_len;
+                                    self.col += token_len;
                                     return Some(Ok(tok));
                                 }
                                 _ => {}
@@ -499,7 +537,7 @@ impl<'s> TokenIter<'s> {
 
                             return Some(Err(ParseError {
                                 line: self.line,
-                                col: self.c,
+                                col: self.col,
                                 type_: ParseErrorType::UnknownValue,
                             }));
                         }
@@ -507,10 +545,7 @@ impl<'s> TokenIter<'s> {
                 }
             }
         }
-        match self.eof.take() {
-            Some(_) => Some(Ok(token(self.line, (self.c, self.c + 1), TokenType::Eof))),
-            None => None,
-        }
+        None
     }
 }
 
@@ -520,9 +555,8 @@ impl<'s> Iterator for TokenIter<'s> {
         TokenIter::next_token(self)
     }
 }
-pub fn lex_document_iter<'s>(
-    inp: &'s str,
-) -> impl Iterator<Item = Result<Token, ParseError>> + use<'s> {
+
+pub(crate) fn lex_document_iter<'s>(inp: &'s str) -> TokenIter<'s> {
     TokenIter::new(inp)
 }
 
