@@ -1,5 +1,57 @@
 # Redfield: Schema-First HTTP APIs
 
+```
+// optionally specify where the service is hosted
+base_url = "https://api.myweatherwebsite.com/api/v1";
+
+// represents all the endpoints of our weather service
+service Weather {
+  // sends an HTTP GET request for current conditions
+  GET current_weather(GetCurrentWeather) -> PointConditions;
+  // sends a HTTP POST request for a user's preferences
+  POST submit_user_preferences(UserPreferences);
+}
+
+message GetCurrentWeather {
+  // nested definitions are possible in messages and oneofs
+  oneof Location {
+    latlong@0: [2]f64,
+    zipcode@1: string,
+    city_name@2: string,
+  }
+  location@0: Location,
+}
+
+enum PrecipType {
+  Rain = 0,
+  Snow = 1,
+  // special enum variant that enables forward compatibility
+  UNKNOWN,
+}
+
+// this enum does not contain the special UNKNOWN variant and is thus closed for modification
+enum Units {
+  // temperature C, precip mm
+  Metric = 0,
+  // temperature F, precip inch
+  Imperial = 1,
+}
+
+message PointConditions {
+  precip_type@0?: PrecipType,
+  units@1: Units,  
+  temperature@2: i16,
+  is_night@3: bool,
+  uv_index@4: i16,
+}
+
+message UserPreferences {
+  userid@0: string,
+  preferred_units@1: Units,
+  home_location@2?: [2]f64,
+}
+```
+
 ## Motivation
 
 Redfield aims to streamline the documentation, scaffolding, and consumption of simple request-response services.
