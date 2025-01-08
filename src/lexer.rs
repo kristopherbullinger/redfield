@@ -21,7 +21,8 @@ pub enum TokenType {
     Equals,
     Comment(Comment),
     Whitespace(Whitespace),
-    Ident(crate::Ident),
+    Ident(CompactString),
+    // Ident(crate::Ident),
     BaseType(crate::BaseType),
     KeywordEnum,
     KeywordMessage,
@@ -34,7 +35,6 @@ pub enum TokenType {
     False,
     Arrow,
     Literal(Literal),
-    Eof,
 }
 
 impl TokenType {
@@ -69,7 +69,6 @@ impl TokenType {
             TokenType::False => "keyword `false`",
             TokenType::Arrow => "`->`",
             TokenType::Literal(_) => "a value literal",
-            TokenType::Eof => "end of input",
         }
     }
 }
@@ -330,7 +329,7 @@ fn munch_literal(inp: &str) -> Result<Option<(Literal, &str)>, ParseLiteralError
         return Ok(Some((lit, rest)));
     }
     if let Some((ide, rest)) = munch_enum_value(inp) {
-        let lit = Literal::EnumVariant(crate::Ident(CompactString::new(ide)));
+        let lit = Literal::EnumVariant(CompactString::new(ide));
         return Ok(Some((lit, rest)));
     }
     if let Some((n, rest)) = munch_literal_decimal_number(inp)? {
@@ -512,7 +511,7 @@ impl<'s> TokenIter<'s> {
                                     token(
                                         self.line,
                                         (self.col, self.col + ide.len()),
-                                        TokenType::Ident(crate::Ident(ide.into())),
+                                        TokenType::Ident(ide.into()),
                                     )
                                 };
                                 self.col += ide.len();
@@ -567,7 +566,8 @@ pub enum Literal {
     HexNumber(LiteralHexNumber),
     String(LiteralString),
     Float(LiteralFloat),
-    EnumVariant(crate::Ident),
+    EnumVariant(CompactString),
+    // EnumVariant(crate::Ident),
     Bool(bool),
 }
 #[derive(PartialEq, Eq, Debug, Clone)]

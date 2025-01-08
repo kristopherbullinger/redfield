@@ -1,4 +1,7 @@
-use std::{collections::HashSet, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use compact_str::CompactString;
 pub mod lexer;
@@ -30,7 +33,7 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
                     return Err(parse_error(
                         line,
                         col,
-                        ParseErrorType::UnknownTopLevelIdent(ide.0),
+                        ParseErrorType::UnknownTopLevelIdent(ident(tok.line, tok.span.0, ide)),
                     ));
                 }
             }
@@ -50,8 +53,8 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
         }
     }
     // parse the rest of the document
-    let mut tld_names = HashSet::new();
-    loop {
+    let mut tld_names: HashSet<Ident> = HashSet::new();
+    let doc = loop {
         let line = iter.line;
         let col = iter.col;
         match tok.type_ {
@@ -59,7 +62,9 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
                 return Err(parse_error(
                     line,
                     col,
-                    ParseErrorType::TopLevelIdentNotAtBeginningOfFile(ide),
+                    ParseErrorType::TopLevelIdentNotAtBeginningOfFile(ident(
+                        tok.line, tok.span.0, ide,
+                    )),
                 ));
             }
             lexer::TokenType::KeywordService => {
@@ -125,14 +130,71 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
         tok = match iter.next() {
             Some(tok) => tok?,
             None => {
-                return Ok(RawDocument {
+                break RawDocument {
                     base_url,
                     services,
                     definitions,
-                });
+                };
+            }
+        }
+    };
+    // ensure all service inputs and outputs refer to top-level messages
+    let def_names: HashMap<&str, &Definition> =
+        HashMap::from_iter(doc.definitions.iter().map(|def| (def.name(), def)));
+    for svc in doc.services.iter() {
+        for prc in svc.procedures.iter() {
+            if let Some(inp) = prc.input.as_ref() {
+                match def_names.get(inp.as_str()) {
+                    Some(Definition::Message(_)) => {}
+                    Some(c) => {
+                        return Err(parse_error(
+                            inp.line,
+                            inp.col,
+                            ParseErrorType::ProcedureInputNotMessage(
+                                svc.name.clone(),
+                                prc.name.clone(),
+                                inp.clone(),
+                                c.type_(),
+                            ),
+                        ))
+                    }
+                    None => {
+                        return Err(parse_error(
+                            inp.line,
+                            inp.col,
+                            ParseErrorType::UnknownIdent(inp.clone()),
+                        ))
+                    }
+                }
+            }
+            if let Some(inp) = prc.output.as_ref() {
+                match def_names.get(inp.as_str()) {
+                    Some(Definition::Message(_)) => {}
+                    Some(c) => {
+                        return Err(parse_error(
+                            inp.line,
+                            inp.col,
+                            ParseErrorType::ProcedureInputNotMessage(
+                                svc.name.clone(),
+                                prc.name.clone(),
+                                inp.clone(),
+                                c.type_(),
+                            ),
+                        ))
+                    }
+                    None => {
+                        return Err(parse_error(
+                            inp.line,
+                            inp.col,
+                            ParseErrorType::UnknownIdent(inp.clone()),
+                        ))
+                    }
+                }
             }
         }
     }
+    // resolve all nested identifiers to include a namespace
+    Ok(doc)
 }
 
 fn parse_error(line: usize, col: usize, type_: ParseErrorType) -> ParseError {
@@ -212,7 +274,7 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<Service, ParseError>
             lexer::TokenType::RParen => None,
             lexer::TokenType::Ident(i) => {
                 expect_next_equals(&mut *iter, lexer::TokenType::RParen)?;
-                Some(i)
+                Some(ident(tok.line, tok.span.0, i))
             }
             _ => {
                 return Err(parse_error(
@@ -278,7 +340,9 @@ fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
         match tok.type_ {
             lexer::TokenType::LBracket => arena.push(TypeNode::List(munch_list_size(&mut *iter)?)),
             lexer::TokenType::Ident(i) => {
-                arena.push(TypeNode::TypeOrIdent(TypeOrIdent::Ident(i)));
+                arena.push(TypeNode::TypeOrIdent(TypeOrIdent::Ident(ident(
+                    tok.line, tok.span.0, i,
+                ))));
                 break;
             }
             lexer::TokenType::BaseType(t) => {
@@ -378,7 +442,7 @@ fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError>
                     return Err(parse_error(
                         line,
                         col,
-                        ParseErrorType::DuplicateFieldName(name),
+                        ParseErrorType::DuplicateFieldName(ident(tok.line, tok.span.0, name)),
                     ));
                 }
                 expect_next_equals(&mut *iter, lexer::TokenType::AtSign)?;
@@ -420,7 +484,7 @@ fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError>
                     field_number,
                     optional,
                     type_,
-                    name,
+                    name: ident(tok.line, tok.span.0, name),
                 });
             }
             lexer::TokenType::RCurly => {
@@ -446,7 +510,11 @@ fn munch_ident(iter: &mut lexer::TokenIter<'_>) -> Result<Ident, ParseError> {
     let col = iter.col;
     let tok = next_not_eof(iter)?;
     match tok.type_ {
-        lexer::TokenType::Ident(i) => Ok(i),
+        lexer::TokenType::Ident(i) => Ok(Ident {
+            value: i,
+            line: tok.line,
+            col: tok.span.0,
+        }),
         _ => {
             return Err(parse_error(line, col, ParseErrorType::ExpectedIdent));
         }
@@ -490,7 +558,9 @@ fn munch_enum(iter: &mut lexer::TokenIter<'_>) -> Result<Enum, ParseError> {
                             return Err(parse_error(
                                 line,
                                 col,
-                                ParseErrorType::DuplicateIdentifier(name),
+                                ParseErrorType::DuplicateIdentifier(ident(
+                                    tok.line, tok.span.0, name,
+                                )),
                             ));
                         }
                         expect_next_equals(&mut *iter, lexer::TokenType::Equals)?;
@@ -532,7 +602,10 @@ fn munch_enum(iter: &mut lexer::TokenIter<'_>) -> Result<Enum, ParseError> {
                                 ));
                             }
                         };
-                        variants.push(EnumVariant { name, value });
+                        variants.push(EnumVariant {
+                            name: ident(tok.line, tok.span.0, name),
+                            value,
+                        });
                     };
                 }
                 expect_next_equals(&mut *iter, lexer::TokenType::Comma)?;
@@ -620,7 +693,7 @@ fn munch_oneof(iter: &mut lexer::TokenIter<'_>) -> Result<OneOf, ParseError> {
                     return Err(parse_error(
                         line,
                         col,
-                        ParseErrorType::DuplicateFieldName(field_name),
+                        ParseErrorType::DuplicateFieldName(ident(tok.line, tok.span.0, field_name)),
                     ));
                 }
                 expect_next_equals(iter, lexer::TokenType::AtSign)?;
@@ -641,7 +714,7 @@ fn munch_oneof(iter: &mut lexer::TokenIter<'_>) -> Result<OneOf, ParseError> {
                 let type_ = munch_type(iter)?;
                 expect_next_equals(iter, lexer::TokenType::Comma)?;
                 variants.push(OneOfVariant {
-                    field_name,
+                    field_name: ident(tok.line, tok.span.0, field_name),
                     field_number,
                     type_,
                 });
@@ -703,7 +776,7 @@ pub enum ParseErrorType {
     ExpectedLBracketTypeOrIdent,
     ExpectedEnumMessageOneOfOrIdent,
     TopLevelIdentNotAtBeginningOfFile(Ident),
-    UnknownTopLevelIdent(CompactString),
+    UnknownTopLevelIdent(Ident),
     DuplicatedEnumVariantUnknown,
     IntegerParseError,
     EnumVariantUnknownNotLast,
@@ -718,7 +791,29 @@ pub enum ParseErrorType {
     ExpectedServiceMessageEnumOrOneof,
     ExpectedIntegerLiteral,
     CustomMessage(CompactString),
+    // (service name,  procedure name, input name, procedure input type)
+    ProcedureInputNotMessage(Ident, Ident, Ident, DefinitionType),
+    // (service name,  procedure name, procedure output type)
+    ProcedureOutpuNotMessage(Ident, Ident, Ident, DefinitionType),
+    UnknownIdent(Ident),
     UnexpectedEof,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum DefinitionType {
+    Message,
+    Enum,
+    OneOf,
+}
+
+impl DefinitionType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DefinitionType::Message => "message",
+            DefinitionType::Enum => "enum",
+            DefinitionType::OneOf => "oneof",
+        }
+    }
 }
 
 impl std::error::Error for ParseError {}
@@ -751,11 +846,13 @@ impl std::fmt::Display for ParseError {
             ParseErrorType::TopLevelIdentNotAtBeginningOfFile(ref i) => write!(
                 f,
                 "top-level identifiers must appear at the top of the file; identifier `{}`",
-                i.0,
+                i.value,
             )?,
-            ParseErrorType::UnknownTopLevelIdent(ref i) => {
-                write!(f, "unknown or unsupported top-level identifier: {}", i)?
-            }
+            ParseErrorType::UnknownTopLevelIdent(ref i) => write!(
+                f,
+                "unknown or unsupported top-level identifier: {}",
+                i.value
+            )?,
             ParseErrorType::DuplicatedEnumVariantUnknown => {
                 write!(f, "special `UNKNOWN` enum variant must appear only once")?
             }
@@ -781,11 +878,20 @@ impl std::fmt::Display for ParseError {
             ParseErrorType::CustomMessage(ref s) => write!(f, "{}", s)?,
             ParseErrorType::UnexpectedEof => write!(f, "unexpected end of input")?,
             ParseErrorType::DuplicateFieldName(ref i) => {
-                write!(f, "duplicate field name `{}`", i.0)?
+                write!(f, "duplicate field name `{}`", i.value)?
             }
             ParseErrorType::DuplicateFieldNumber(n) => write!(f, "duplicate field number `{}`", n)?,
             ParseErrorType::DuplicateIdentifier(ref i) => {
-                write!(f, "duplicate identifier name `{}`", i.0)?;
+                write!(f, "duplicate identifier name `{}`", i.value)?;
+            }
+            ParseErrorType::ProcedureInputNotMessage(ref svc, ref prc, ref inp, typ) => {
+                write!(f, "procedure input types must be of type `message`: service `{}` procedure `{}` input `{}` is of type {}", svc.as_str(), prc.as_str(), inp.as_str(), typ.as_str())?;
+            }
+            ParseErrorType::ProcedureOutpuNotMessage(ref svc, ref prc, ref outpt, typ) => {
+                write!(f, "procedure output types must be of type `message`: service `{}` procedure `{}` output `{}` is of type {}", svc.as_str(), prc.as_str(), outpt.as_str(), typ.as_str())?;
+            }
+            ParseErrorType::UnknownIdent(ref i) => {
+                write!(f, "could not find definition for ident `{}`", i.value)?;
             }
         }
         Ok(())
@@ -819,12 +925,23 @@ pub struct Procedure {
     pub output: Option<Ident>,
 }
 
-#[derive(Clone, PartialEq, Eq, Default, Debug, Hash)]
-pub struct Ident(pub(crate) CompactString);
+// #[derive(Clone, PartialEq, Eq, Default, Debug, Hash)]
+// pub struct Ident(pub(crate) CompactString);
 impl Ident {
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        self.value.as_str()
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Default, Debug, Hash)]
+pub struct Ident {
+    pub(crate) value: CompactString,
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+}
+
+fn ident(line: usize, col: usize, value: CompactString) -> Ident {
+    Ident { value, line, col }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -838,6 +955,24 @@ pub enum Definition {
     Enum(Enum),
     OneOf(OneOf),
     Message(Message),
+}
+
+impl Definition {
+    fn name(&self) -> &str {
+        match self {
+            Definition::Enum(inner) => inner.name.as_str(),
+            Definition::OneOf(inner) => inner.name.as_str(),
+            Definition::Message(inner) => inner.name.as_str(),
+        }
+    }
+
+    fn type_(&self) -> DefinitionType {
+        match self {
+            Definition::Enum(_) => DefinitionType::Enum,
+            Definition::OneOf(_) => DefinitionType::OneOf,
+            Definition::Message(_) => DefinitionType::Message,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
