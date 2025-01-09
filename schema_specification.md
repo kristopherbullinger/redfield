@@ -11,7 +11,7 @@ This file documents the structure of a redfield schema file using EBNF syntax.
 ```
 redfield_schema = [ "base_url" "=" HTTP_URL ";" ] { top_level_definition }
 top_level_definition = message | service | enum | oneof
-base_type = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "bool" | "string" | "bytes" | "void"
+base_type = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "bool" | "string" | "bytes" | "null"
 
 ascii_alphanumeric = ascii_digit | ascii_alpha_upper | ascii_alpha_lower
 ascii_alpha_lower = "a"..."z"

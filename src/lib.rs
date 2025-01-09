@@ -1040,7 +1040,7 @@ pub enum BaseType {
     Bytes,
     List,
     SizedList(usize),
-    Void,
+    Null,
 }
 
 #[derive(Debug, PartialEq, Eq, Default)]

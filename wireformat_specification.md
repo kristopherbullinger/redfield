@@ -14,7 +14,7 @@ Like protobuf, redfield messages are encoded as Tag-Length(?)-Value. A 16-bit in
 |4|u64 or i64 or f64|
 |5|string, byte array, message, or list|
 |6|oneof|
-|7|void|
+|7|null|
 
 Therefore, the maximum number of fields in a single message definition is `u16::MAX >> 3 = 8191`.
 
@@ -120,12 +120,12 @@ Lists are length-prefixed with their length in bytes, NOT the number of items pr
 #### JSON
 Lists are encoded as JSON arrays.
 
-### Void
-`void` is a special type that represents the absence of a value, much like JSON's `null`. It's not very interesting by itself, but may be used as a member of a `oneof`.
+### Null
+`null` is a special type that represents the absence of a value, just like JSON's `null`. It's not very interesting by itself, but may be used as a member of a `oneof`.
 #### Redfield
-`void` contains no value; it is comprised only of a tag.
+`null` contains no value; it is comprised only of a tag.
 #### JSON
-`void` is encoded as JSON `null`.
+`null` is encoded as JSON `null`.
 
 ### Optional Message Fields
 An optional message field may be omitted from the encoded form.

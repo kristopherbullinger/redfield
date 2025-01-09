@@ -28,7 +28,7 @@ pub enum TokenType {
     KeywordMessage,
     KeywordOneof,
     KeywordService,
-    KeywordVoid,
+    KeywordNull,
     AtSign,
     Verb(crate::Verb),
     True,
@@ -59,7 +59,7 @@ impl TokenType {
             TokenType::KeywordMessage => "keyword `message`",
             TokenType::KeywordOneof => "keyword `oneof`",
             TokenType::KeywordService => "keyword `service`",
-            TokenType::KeywordVoid => "keyword `void`",
+            TokenType::KeywordNull => "keyword `null`",
             TokenType::AtSign => "`@`",
             TokenType::Verb(ref vb) => match vb {
                 crate::Verb::Get => "keyword `GET`",
@@ -137,7 +137,7 @@ static BASE_TYPES_TOKENS: &[(&str, TokenType)] = &[
     ("i64", TokenType::BaseType(crate::BaseType::I64)),
     ("string", TokenType::BaseType(crate::BaseType::String)),
     ("bytes", TokenType::BaseType(crate::BaseType::Bytes)),
-    ("void", TokenType::BaseType(crate::BaseType::Void)),
+    ("null", TokenType::BaseType(crate::BaseType::Null)),
 ];
 
 fn is_whitespace(b: u8) -> bool {
