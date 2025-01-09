@@ -23,16 +23,14 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
 
     // parse top-level identifiers
     loop {
-        let line = iter.line;
-        let col = iter.col;
         match tok.type_ {
             lexer::TokenType::Ident(ide) => {
                 if ide.as_str() == "base_url" {
                     base_url = Some(munch_base_url(&mut iter)?);
                 } else {
                     return Err(parse_error(
-                        line,
-                        col,
+                        tok.line,
+                        tok.span.0,
                         ParseErrorType::UnknownTopLevelIdent(ident(tok.line, tok.span.0, ide)),
                     ));
                 }
@@ -55,13 +53,11 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
     // parse the rest of the document
     let mut tld_names: HashSet<Ident> = HashSet::new();
     let doc = loop {
-        let line = iter.line;
-        let col = iter.col;
         match tok.type_ {
             lexer::TokenType::Ident(ide) => {
                 return Err(parse_error(
-                    line,
-                    col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::TopLevelIdentNotAtBeginningOfFile(ident(
                         tok.line, tok.span.0, ide,
                     )),
@@ -81,39 +77,33 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
                 services.push(svc);
             }
             lexer::TokenType::KeywordMessage => {
-                let line = iter.line;
-                let col = iter.col;
                 let msg = munch_message(&mut iter)?;
                 if !tld_names.insert(msg.name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        msg.name.line,
+                        msg.name.col,
                         ParseErrorType::DuplicateIdentifier(msg.name),
                     ));
                 }
                 definitions.push(Definition::Message(msg));
             }
             lexer::TokenType::KeywordEnum => {
-                let line = iter.line;
-                let col = iter.col;
                 let enm = munch_enum(&mut iter)?;
                 if !tld_names.insert(enm.name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        enm.name.line,
+                        enm.name.col,
                         ParseErrorType::DuplicateIdentifier(enm.name),
                     ));
                 }
                 definitions.push(Definition::Enum(enm));
             }
             lexer::TokenType::KeywordOneof => {
-                let line = iter.line;
-                let col = iter.col;
                 let oneof = munch_oneof(&mut iter)?;
                 if !tld_names.insert(oneof.name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        oneof.name.line,
+                        oneof.name.col,
                         ParseErrorType::DuplicateIdentifier(oneof.name),
                     ));
                 }
@@ -121,8 +111,8 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
             }
             _ => {
                 return Err(parse_error(
-                    line,
-                    col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::ExpectedServiceMessageEnumOrOneof,
                 ));
             }
@@ -139,14 +129,14 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
         }
     };
     // ensure all service inputs and outputs refer to top-level messages
-    let def_names: HashMap<&str, &Definition> =
-        HashMap::from_iter(doc.definitions.iter().map(|def| (def.name(), def)));
+    let def_names: HashMap<&str, DefinitionType> =
+        HashMap::from_iter(doc.definitions.iter().map(|def| (def.name(), def.type_())));
     for svc in doc.services.iter() {
         for prc in svc.procedures.iter() {
             if let Some(inp) = prc.input.as_ref() {
-                match def_names.get(inp.as_str()) {
-                    Some(Definition::Message(_)) => {}
-                    Some(c) => {
+                match def_names.get(inp.as_str()).copied() {
+                    Some(DefinitionType::Message) => {}
+                    Some(type_) => {
                         return Err(parse_error(
                             inp.line,
                             inp.col,
@@ -154,7 +144,7 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
                                 svc.name.clone(),
                                 prc.name.clone(),
                                 inp.clone(),
-                                c.type_(),
+                                type_,
                             ),
                         ))
                     }
@@ -168,17 +158,17 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
                 }
             }
             if let Some(inp) = prc.output.as_ref() {
-                match def_names.get(inp.as_str()) {
-                    Some(Definition::Message(_)) => {}
-                    Some(c) => {
+                match def_names.get(inp.as_str()).copied() {
+                    Some(DefinitionType::Message) => {}
+                    Some(type_) => {
                         return Err(parse_error(
                             inp.line,
                             inp.col,
-                            ParseErrorType::ProcedureInputNotMessage(
+                            ParseErrorType::ProcedureOutpuNotMessage(
                                 svc.name.clone(),
                                 prc.name.clone(),
                                 inp.clone(),
-                                c.type_(),
+                                type_,
                             ),
                         ))
                     }
@@ -213,13 +203,12 @@ fn next_not_eof(iter: &mut lexer::TokenIter<'_>) -> Result<lexer::Token, ParseEr
 }
 
 fn munch_literal_string(iter: &mut lexer::TokenIter<'_>) -> Result<CompactString, ParseError> {
-    let line = iter.line;
-    let col = iter.col;
-    match next_not_eof(iter)?.type_ {
+    let tok = next_not_eof(iter)?;
+    match tok.type_ {
         lexer::TokenType::Literal(lexer::Literal::String(s)) => Ok(s.0),
         _ => Err(parse_error(
-            line,
-            col,
+            tok.line,
+            tok.span.0,
             ParseErrorType::ExpectedStringLiteral,
         )),
     }
@@ -247,8 +236,8 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<Service, ParseError>
             lexer::TokenType::RCurly => return Ok(Service { name, procedures }),
             _ => {
                 return Err(parse_error(
-                    iter.line,
-                    iter.col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::ExpectedProcedureVerb,
                 ))
             }
@@ -267,8 +256,6 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<Service, ParseError>
             n
         };
         expect_next_equals(&mut *iter, lexer::TokenType::LParen)?;
-        let line = iter.line;
-        let col = iter.col;
         let tok = next_not_eof(iter)?;
         let input = match tok.type_ {
             lexer::TokenType::RParen => None,
@@ -278,22 +265,20 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<Service, ParseError>
             }
             _ => {
                 return Err(parse_error(
-                    line,
-                    col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::ExpectedIdentOrRParen,
                 ))
             }
         };
-        let line = iter.line;
-        let col = iter.col;
         let tok = next_not_eof(iter)?;
         let output = match tok.type_ {
             lexer::TokenType::Semicolon => None,
             lexer::TokenType::Arrow => Some(munch_ident(&mut *iter)?),
             _ => {
                 return Err(parse_error(
-                    line,
-                    col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::ExpectedIdentOrSemicolon,
                 ))
             }
@@ -310,22 +295,19 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<Service, ParseError>
 
 // assumes "[" already munched
 fn munch_list_size(iter: &mut lexer::TokenIter<'_>) -> Result<Option<usize>, ParseError> {
-    let line = iter.line;
-    let col = iter.col;
     let tok = next_not_eof(iter)?;
     match tok.type_ {
         lexer::TokenType::RBracket => Ok(None),
         lexer::TokenType::Literal(lexer::Literal::DecimalNumber(d)) => {
-            let sz = d
-                .as_str()
-                .parse()
-                .map_err(|_| parse_error(line, col, ParseErrorType::IntegerParseError))?;
+            let sz = d.as_str().parse().map_err(|_| {
+                parse_error(tok.line, tok.span.0, ParseErrorType::IntegerParseError)
+            })?;
             expect_next_equals(iter, lexer::TokenType::RBracket)?;
             Ok(Some(sz))
         }
         _ => Err(parse_error(
-            line,
-            col,
+            tok.line,
+            tok.span.0,
             ParseErrorType::ExpectedRBracketOrNumber,
         )),
     }
@@ -334,8 +316,6 @@ fn munch_list_size(iter: &mut lexer::TokenIter<'_>) -> Result<Option<usize>, Par
 fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
     let mut arena = smallvec::SmallVec::<[TypeNode; 4]>::new();
     loop {
-        let line = iter.line;
-        let col = iter.col;
         let tok = next_not_eof(iter)?;
         match tok.type_ {
             lexer::TokenType::LBracket => arena.push(TypeNode::List(munch_list_size(&mut *iter)?)),
@@ -351,8 +331,8 @@ fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
             }
             _ => {
                 return Err(parse_error(
-                    line,
-                    col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::ExpectedLBracketTypeOrIdent,
                 ))
             }
@@ -361,19 +341,27 @@ fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
     Ok(Type { arena })
 }
 
-fn munch_decimal_number<T: FromStr>(iter: &mut lexer::TokenIter<'_>) -> Result<T, ParseError> {
-    let line = iter.line;
-    let col = iter.col;
+struct WithPosition<T> {
+    line: usize,
+    span: (usize, usize),
+    val: T,
+}
+fn munch_decimal_number<T: FromStr>(
+    iter: &mut lexer::TokenIter<'_>,
+) -> Result<WithPosition<T>, ParseError> {
     let tok = next_not_eof(iter)?;
     match tok.type_ {
-        lexer::TokenType::Literal(lexer::Literal::DecimalNumber(d)) => d
-            .as_str()
-            .parse()
-            .map_err(|_| parse_error(line, col, ParseErrorType::IntegerParseError)),
+        lexer::TokenType::Literal(lexer::Literal::DecimalNumber(d)) => Ok(WithPosition {
+            line: tok.line,
+            span: tok.span,
+            val: d.as_str().parse().map_err(|_| {
+                parse_error(tok.line, tok.span.0, ParseErrorType::IntegerParseError)
+            })?,
+        }),
         _ => {
             return Err(parse_error(
-                line,
-                col,
+                tok.line,
+                tok.span.0,
                 ParseErrorType::ExpectedIntegerLiteral,
             ))
         }
@@ -392,44 +380,36 @@ fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError>
 
     expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
     loop {
-        let line = iter.line;
-        let col = iter.col;
         let tok = next_not_eof(iter)?;
         match tok.type_ {
             lexer::TokenType::KeywordEnum => {
-                let line = iter.line;
-                let col = iter.col;
                 let enm = munch_enum(&mut *iter)?;
                 if !nested_identifier_names.insert(enm.name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        enm.name.line,
+                        enm.name.col,
                         ParseErrorType::DuplicateIdentifier(enm.name),
                     ));
                 }
                 definitions.push(Definition::Enum(enm));
             }
             lexer::TokenType::KeywordOneof => {
-                let line = iter.line;
-                let col = iter.col;
                 let oneof = munch_oneof(&mut *iter)?;
                 if !nested_identifier_names.insert(oneof.name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        oneof.name.line,
+                        oneof.name.col,
                         ParseErrorType::DuplicateIdentifier(oneof.name),
                     ));
                 }
                 definitions.push(Definition::OneOf(oneof));
             }
             lexer::TokenType::KeywordMessage => {
-                let line = iter.line;
-                let col = iter.col;
                 let msg = munch_message(&mut *iter)?;
                 if !nested_identifier_names.insert(msg.name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        msg.name.line,
+                        msg.name.col,
                         ParseErrorType::DuplicateIdentifier(msg.name),
                     ));
                 }
@@ -440,29 +420,26 @@ fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError>
                 // check duplicated field name
                 if !field_names.insert(name.clone()) {
                     return Err(parse_error(
-                        line,
-                        col,
+                        tok.line,
+                        tok.span.0,
                         ParseErrorType::DuplicateFieldName(ident(tok.line, tok.span.0, name)),
                     ));
                 }
                 expect_next_equals(&mut *iter, lexer::TokenType::AtSign)?;
                 let field_number = {
-                    let line = iter.line;
-                    let col = iter.col;
-                    let num = munch_decimal_number(&mut *iter)?;
+                    let munched = munch_decimal_number(&mut *iter)?;
+                    let num = munched.val;
                     // check duplicated field number
                     if !field_numbers.insert(num) {
                         return Err(parse_error(
-                            line,
-                            col,
+                            munched.line,
+                            munched.span.0,
                             ParseErrorType::DuplicateFieldNumber(num),
                         ));
                     }
                     num
                 };
                 let mut optional = false;
-                let line = iter.line;
-                let col = iter.col;
                 let tok = next_not_eof(iter)?;
                 match tok.type_ {
                     lexer::TokenType::QuestionMark => {
@@ -472,8 +449,8 @@ fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError>
                     lexer::TokenType::Colon => {}
                     _ => {
                         return Err(parse_error(
-                            line,
-                            col,
+                            tok.line,
+                            tok.span.0,
                             ParseErrorType::ExpectedColonOrQuestionMark,
                         ))
                     }
@@ -496,8 +473,8 @@ fn munch_message(iter: &mut lexer::TokenIter<'_>) -> Result<Message, ParseError>
             }
             _ => {
                 return Err(parse_error(
-                    line,
-                    col,
+                    tok.line,
+                    tok.span.0,
                     ParseErrorType::ExpectedEnumMessageOneOfOrIdent,
                 ))
             }
@@ -698,13 +675,12 @@ fn munch_oneof(iter: &mut lexer::TokenIter<'_>) -> Result<OneOf, ParseError> {
                 }
                 expect_next_equals(iter, lexer::TokenType::AtSign)?;
                 let field_number = {
-                    let line = iter.line;
-                    let col = iter.col;
-                    let num = munch_decimal_number(iter)?;
+                    let munched = munch_decimal_number(iter)?;
+                    let num = munched.val;
                     if !field_numbers.insert(num) {
                         return Err(parse_error(
-                            line,
-                            col,
+                            munched.line,
+                            munched.span.0,
                             ParseErrorType::DuplicateFieldNumber(num),
                         ));
                     }
