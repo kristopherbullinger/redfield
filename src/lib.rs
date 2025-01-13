@@ -277,7 +277,7 @@ fn munch_list_size(iter: &mut lexer::TokenIter<'_>) -> Result<Option<usize>, Par
     }
 }
 
-fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
+fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<TypeRaw, ParseError> {
     let mut modifiers = SmallVec::<[ListSize; 4]>::new();
     let base = loop {
         let tok = next_not_eof(iter)?;
@@ -304,7 +304,7 @@ fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<Type, ParseError> {
             }
         }
     };
-    Ok(Type { modifiers, base })
+    Ok(TypeRaw { modifiers, base })
 }
 
 struct WithPosition<T> {
@@ -350,11 +350,16 @@ impl Scopes {
         }
     }
 
-    fn add_new_layer(&mut self) {
+    fn push_scope_layer(&mut self) {
         self.nested.push(Default::default());
     }
 
-    fn pop_layer(&mut self) {
+    fn push_scope_layer_<'a>(&'a mut self) -> ScopeDropGuard<'a> {
+        self.nested.push(Default::default());
+        ScopeDropGuard(self)
+    }
+
+    fn pop_scope_layer(&mut self) {
         self.nested.pop();
     }
 
@@ -374,6 +379,13 @@ impl Scopes {
 struct Context {
     scopes: Scopes,
     types: Types,
+}
+
+struct ScopeDropGuard<'a>(&'a mut Scopes);
+impl<'a> std::ops::Drop for ScopeDropGuard<'a> {
+    fn drop(&mut self) {
+        self.0.pop_scope_layer()
+    }
 }
 
 impl Context {
@@ -403,12 +415,12 @@ impl Context {
         }
     }
 
-    fn new_scope(&mut self) {
-        self.scopes.add_new_layer()
+    fn push_scope_layer(&mut self) {
+        self.scopes.push_scope_layer()
     }
 
-    fn pop_scope(&mut self) {
-        self.scopes.pop_layer()
+    fn pop_scope_layer(&mut self) {
+        self.scopes.pop_scope_layer()
     }
 
     fn lookup_ident(&self, i: &Ident) -> Option<(TypeToken, DefinitionType)> {
@@ -428,14 +440,14 @@ impl Context {
 fn munch_message(
     iter: &mut lexer::TokenIter<'_>,
     ctx: &mut Context,
-) -> Result<Message_, ParseError> {
+) -> Result<Message, ParseError> {
     fn munch_message_inner(
         iter: &mut lexer::TokenIter<'_>,
         ctx: &mut Context,
         msg_token: TypeToken,
-    ) -> Result<Message_, ParseError> {
+    ) -> Result<Message, ParseError> {
         let mut definitions: Vec<Definition> = vec![];
-        let mut fields_: Vec<(Ident, u16, Type, bool)> = vec![];
+        let mut fields_: Vec<(Ident, u16, TypeRaw, bool)> = vec![];
         // test for field number uniqueness
         let mut field_numbers = HashSet::new();
         expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
@@ -503,10 +515,10 @@ fn munch_message(
                             ));
                         }
                     }
-                    let mut fields: Vec<MessageField_> = vec![];
+                    let mut fields: Vec<MessageField> = vec![];
                     for (ident, field_number, type_, optional) in fields_.into_iter() {
                         let (type_base, indirection) = match type_.base {
-                            TypeOrIdent::Type(t) => (TypeOrToken_::Type(t), Indirection::Direct),
+                            TypeOrIdent::Type(t) => (TypeOrToken::Type(t), Indirection::Direct),
                             TypeOrIdent::Ident(i) => {
                                 let tok = ctx.lookup_ident_token(&i).ok_or(parse_error(
                                     i.line,
@@ -525,13 +537,13 @@ fn munch_message(
                                 };
                                 // insert associations between this message and type referenced by this field
                                 ctx.add_link(msg_token, tok, indirection);
-                                (TypeOrToken_::Token(tok), indirection)
+                                (TypeOrToken::Token(tok), indirection)
                             }
                         };
-                        fields.push(MessageField_ {
+                        fields.push(MessageField {
                             ident,
                             field_number,
-                            type_: Type_ {
+                            type_: Type {
                                 modifiers: type_.modifiers,
                                 base: type_base,
                             },
@@ -539,7 +551,7 @@ fn munch_message(
                             indirection,
                         });
                     }
-                    break Message_ {
+                    break Message {
                         ident: msg_token,
                         definitions,
                         fields,
@@ -558,9 +570,9 @@ fn munch_message(
     }
     let ident = munch_ident(&mut *iter)?;
     let msg_token = ctx.push_new_ident(ident, DefinitionType::Message)?;
-    ctx.new_scope();
+    ctx.push_scope_layer();
     let res = munch_message_inner(iter, ctx, msg_token);
-    ctx.pop_scope();
+    ctx.pop_scope_layer();
     res
 }
 
@@ -581,7 +593,7 @@ fn munch_ident(iter: &mut lexer::TokenIter<'_>) -> Result<Ident, ParseError> {
 }
 
 // assumed "enum" keyword already chomped
-fn munch_enum_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<Enum_, ParseError> {
+fn munch_enum_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<Enum, ParseError> {
     // munch ident
     let ident = munch_ident(&mut *iter)?;
     let type_token = ctx.push_new_ident(ident, DefinitionType::Enum)?;
@@ -671,7 +683,7 @@ fn munch_enum_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<Enu
                         ));
                     }
                 }
-                return Ok(Enum_ {
+                return Ok(Enum {
                     ident: type_token,
                     variants,
                     has_unknown,
@@ -697,7 +709,7 @@ fn munch_oneof_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<On
     ) -> Result<OneOf, ParseError> {
         expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
         let mut definitions: Vec<Definition> = vec![];
-        let mut variants_: Vec<(Ident, u16, Type)> = vec![];
+        let mut variants_: Vec<(Ident, u16, TypeRaw)> = vec![];
         let mut field_numbers = HashSet::new();
         loop {
             let tok = next_not_eof(iter)?;
@@ -717,7 +729,7 @@ fn munch_oneof_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<On
                     let mut variants: Vec<OneOfVariant> = vec![];
                     for (ident, field_number, type_) in variants_ {
                         let (type_base, indirection) = match type_.base {
-                            TypeOrIdent::Type(t) => (TypeOrToken_::Type(t), Indirection::Direct),
+                            TypeOrIdent::Type(t) => (TypeOrToken::Type(t), Indirection::Direct),
                             TypeOrIdent::Ident(i) => {
                                 let tok = ctx.lookup_ident_token(&i).ok_or(parse_error(
                                     i.line,
@@ -736,13 +748,13 @@ fn munch_oneof_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<On
                                 };
                                 // insert associations between this message and type referenced by this field
                                 ctx.add_link(oneof_token, tok, indirection);
-                                (TypeOrToken_::Token(tok), indirection)
+                                (TypeOrToken::Token(tok), indirection)
                             }
                         };
                         variants.push(OneOfVariant {
                             ident,
                             field_number,
-                            type_: Type_ {
+                            type_: Type {
                                 modifiers: type_.modifiers,
                                 base: type_base,
                             },
@@ -803,9 +815,9 @@ fn munch_oneof_(iter: &mut lexer::TokenIter<'_>, ctx: &mut Context) -> Result<On
     }
     let ident = munch_ident(&mut *iter)?;
     let token = ctx.push_new_ident(ident, DefinitionType::OneOf)?;
-    ctx.new_scope();
+    ctx.push_scope_layer();
     let res = munch_oneof_inner(iter, ctx, token);
-    ctx.pop_scope();
+    ctx.pop_scope_layer();
     res
 }
 
@@ -1108,9 +1120,26 @@ pub enum Verb {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Definition {
-    Enum(Enum_),
+    Enum(Enum),
     OneOf(OneOf),
-    Message(Message_),
+    Message(Message),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DefinitionRaw {
+    Enum(Enum),
+    OneOf(OneOfRaw),
+    Message(MessageRaw),
+}
+
+impl DefinitionRaw {
+    fn resolve_idents(self, ctx: &mut Context) -> Result<Definition, ParseError> {
+        Ok(match self {
+            DefinitionRaw::Enum(e) => Definition::Enum(e),
+            DefinitionRaw::OneOf(oneof) => Definition::OneOf(oneof.resolve_idents(ctx)?),
+            DefinitionRaw::Message(msg) => Definition::Message(msg.resolve_idents(ctx)?),
+        })
+    }
 }
 
 impl Definition {
@@ -1124,7 +1153,7 @@ impl Definition {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Enum_ {
+pub struct Enum {
     pub ident: TypeToken,
     pub variants: Vec<EnumVariant>,
     pub has_unknown: bool,
@@ -1143,6 +1172,31 @@ pub struct OneOf {
     pub variants: Vec<OneOfVariant>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct OneOfRaw {
+    pub ident: TypeToken,
+    pub definitions: Vec<DefinitionRaw>,
+    pub variants: Vec<OneOfVariantRaw>,
+}
+
+impl OneOfRaw {
+    fn resolve_idents(self, ctx: &mut Context) -> Result<OneOf, ParseError> {
+        Ok(OneOf {
+            ident: self.ident,
+            definitions: self
+                .definitions
+                .into_iter()
+                .map(|def| def.resolve_idents(ctx))
+                .collect::<Result<_, ParseError>>()?,
+            variants: self
+                .variants
+                .into_iter()
+                .map(|var| var.resolve_idents(self.ident, ctx))
+                .collect::<Result<_, ParseError>>()?,
+        })
+    }
+}
+
 impl OneOf {
     // all fields which point to `self` must be marked as requiring indirection
     fn set_indirection(&mut self, ctx: &Context) {
@@ -1152,8 +1206,8 @@ impl OneOf {
                 continue;
             }
             let tok = match variant.type_.base {
-                TypeOrToken_::Type(_) => continue, // this field does not point to a user-defined type
-                TypeOrToken_::Token(tok) => tok,
+                TypeOrToken::Type(_) => continue, // this field does not point to a user-defined type
+                TypeOrToken::Token(tok) => tok,
             };
             if can_reach(tok, self.ident, ctx) {
                 // cycle detected -- add indirection
@@ -1167,8 +1221,58 @@ impl OneOf {
 pub struct OneOfVariant {
     pub ident: Ident,
     pub field_number: u16,
-    pub type_: Type_,
+    pub type_: Type,
     pub indirection: Indirection,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct OneOfVariantRaw {
+    pub ident: Ident,
+    pub field_number: u16,
+    pub type_: TypeRaw,
+    pub indirection: Indirection,
+}
+
+impl OneOfVariantRaw {
+    fn resolve_idents(
+        self,
+        oneof_token: TypeToken,
+        ctx: &mut Context,
+    ) -> Result<OneOfVariant, ParseError> {
+        let (type_base, indirection) = match self.type_.base {
+            TypeOrIdent::Type(t) => (TypeOrToken::Type(t), Indirection::Direct),
+            TypeOrIdent::Ident(i) => {
+                let tok = ctx.lookup_ident_token(&i).ok_or(parse_error(
+                    i.line,
+                    i.col,
+                    ParseErrorType::UnknownIdent(i.clone()),
+                ))?;
+                // if the field's user type is in an unsized list, it is indirectly referenced
+                let indirection = if self
+                    .type_
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, ListSize::Unsized))
+                {
+                    Indirection::Indirect
+                } else {
+                    Indirection::Direct
+                };
+                // insert associations between this type and type referenced by this field
+                ctx.add_link(oneof_token, tok, indirection);
+                (TypeOrToken::Token(tok), indirection)
+            }
+        };
+        Ok(OneOfVariant {
+            ident: self.ident,
+            field_number: self.field_number,
+            type_: Type {
+                modifiers: self.type_.modifiers,
+                base: type_base,
+            },
+            indirection,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1178,7 +1282,7 @@ pub enum TypeOrIdent {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum TypeOrToken_ {
+pub enum TypeOrToken {
     Type(BaseType),
     Token(TypeToken),
 }
@@ -1196,15 +1300,15 @@ enum ListSize {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Type {
+pub struct TypeRaw {
     modifiers: smallvec::SmallVec<[ListSize; 4]>,
     base: TypeOrIdent,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Type_ {
+pub struct Type {
     modifiers: smallvec::SmallVec<[ListSize; 4]>,
-    base: TypeOrToken_,
+    base: TypeOrToken,
 }
 
 #[derive(Clone, PartialEq, Eq, Copy, Debug)]
@@ -1226,13 +1330,40 @@ pub enum BaseType {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Message_ {
+pub struct Message {
     pub ident: TypeToken,
     pub definitions: Vec<Definition>,
-    pub fields: Vec<MessageField_>,
+    pub fields: Vec<MessageField>,
 }
 
-impl Message_ {
+#[derive(Debug, PartialEq, Eq)]
+pub struct MessageRaw {
+    pub ident: TypeToken,
+    pub definitions: Vec<DefinitionRaw>,
+    pub fields: Vec<MessageFieldRaw>,
+}
+
+impl MessageRaw {
+    fn resolve_idents(self, ctx: &mut Context) -> Result<Message, ParseError> {
+        ctx.push_scope_layer();
+        ctx.pop_scope_layer();
+        Ok(Message {
+            ident: self.ident,
+            definitions: self
+                .definitions
+                .into_iter()
+                .map(|def| def.resolve_idents(ctx))
+                .collect::<Result<_, ParseError>>()?,
+            fields: self
+                .fields
+                .into_iter()
+                .map(|fld| fld.resolve_idents(self.ident, ctx))
+                .collect::<Result<_, ParseError>>()?,
+        })
+    }
+}
+
+impl Message {
     // all fields which point to `self` must be marked as requiring indirection
     fn set_indirection(&mut self, ctx: &Context) {
         for f in self.fields.iter_mut() {
@@ -1241,8 +1372,8 @@ impl Message_ {
                 continue;
             }
             let tok = match f.type_.base {
-                TypeOrToken_::Type(_) => continue, // this field does not point to a user-defined type
-                TypeOrToken_::Token(tok) => tok,
+                TypeOrToken::Type(_) => continue, // this field does not point to a user-defined type
+                TypeOrToken::Token(tok) => tok,
             };
             if can_reach(tok, self.ident, ctx) {
                 // cycle detected -- add indirection
@@ -1271,12 +1402,64 @@ fn can_reach(start: TypeToken, target: TypeToken, ctx: &Context) -> bool {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageField_ {
+pub struct MessageField {
     pub ident: Ident,
     pub field_number: u16,
-    pub type_: Type_,
+    pub type_: Type,
     pub optional: bool,
     pub indirection: Indirection,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct MessageFieldRaw {
+    pub ident: Ident,
+    pub field_number: u16,
+    pub type_: TypeRaw,
+    pub optional: bool,
+    pub indirection: Indirection,
+}
+
+impl MessageFieldRaw {
+    fn resolve_idents(
+        self,
+        msg_token: TypeToken,
+        ctx: &mut Context,
+    ) -> Result<MessageField, ParseError> {
+        let (type_base, indirection) = match self.type_.base {
+            TypeOrIdent::Type(t) => (TypeOrToken::Type(t), Indirection::Direct),
+            TypeOrIdent::Ident(i) => {
+                let tok = ctx.lookup_ident_token(&i).ok_or(parse_error(
+                    i.line,
+                    i.col,
+                    ParseErrorType::UnknownIdent(i.clone()),
+                ))?;
+                // if the field's user type is in an unsized list, it is indirectly referenced
+                let indirection = if self
+                    .type_
+                    .modifiers
+                    .iter()
+                    .any(|m| matches!(m, ListSize::Unsized))
+                {
+                    Indirection::Indirect
+                } else {
+                    Indirection::Direct
+                };
+                // insert associations between this message and type referenced by this field
+                ctx.add_link(msg_token, tok, indirection);
+                (TypeOrToken::Token(tok), indirection)
+            }
+        };
+        Ok(MessageField {
+            ident: self.ident,
+            field_number: self.field_number,
+            type_: Type {
+                modifiers: self.type_.modifiers,
+                base: type_base,
+            },
+            optional: self.optional,
+            indirection,
+        })
+    }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug, Hash)]
