@@ -1,0 +1,8 @@
+[package]
+name = "redfield-parse"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+compact_str = "0.8.1"
+smallvec = "1.13.2"
