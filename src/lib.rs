@@ -1,3 +1,4 @@
+#![deny(elided_lifetimes_in_paths)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
@@ -7,11 +8,11 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 pub mod lexer;
 
-pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
+pub fn parse_document_from_str(inp: &str) -> Result<Document, ParseError> {
     let mut iter = lexer::lex_document_iter(inp);
     let mut base_url = None;
     let Some(tok) = iter.next() else {
-        return Ok(RawDocument {
+        return Ok(Document {
             base_url: None,
             services: vec![],
             definitions: vec![],
@@ -43,7 +44,7 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
         tok = match iter.next() {
             Some(tok) => tok?,
             None => {
-                return Ok(RawDocument {
+                return Ok(Document {
                     base_url,
                     services: vec![],
                     definitions: vec![],
@@ -106,10 +107,16 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
         validate_svcs(services, &toplevel_names)?
     };
     // validate idents and add type associations
+    let mut scopes = {
+        let mut scopes = Scopes::default();
+        for def in definitions_raw.iter() {
+            scopes.global.insert(def.name(&types.idents), def.token());
+        }
+        scopes
+    };
     let mut definitions: Vec<Definition> = vec![];
-    let mut scopes = Scopes::default();
     for def in definitions_raw {
-        definitions.push(def.resolve_idents(&mut scopes, &mut types.links)?);
+        definitions.push(def.resolve_idents(&mut scopes, &types.idents, &mut types.links)?);
     }
     // detect recursion of user-defined types and insert indirection
     {
@@ -121,7 +128,7 @@ pub fn parse_document_from_str(inp: &str) -> Result<RawDocument, ParseError> {
             }
         }
     }
-    Ok(RawDocument {
+    Ok(Document {
         base_url,
         services,
         definitions,
@@ -338,40 +345,32 @@ fn munch_decimal_number<T: FromStr>(
     }
 }
 
-type ScopeLayer = HashMap<CompactString, TypeToken>;
+type ScopeLayer<'a> = HashMap<&'a str, TypeToken>;
 #[derive(Debug, Default)]
-struct Scopes {
-    global: ScopeLayer,
-    nested: Vec<ScopeLayer>,
+struct Scopes<'a> {
+    global: ScopeLayer<'a>,
+    nested: Vec<ScopeLayer<'a>>,
 }
 
 // pops the scope stack when dropped so we don't forget
-struct ScopeGuard<'a>(&'a mut Scopes);
-impl<'a> std::ops::Drop for ScopeGuard<'a> {
+struct ScopeGuard<'a, 'b>(&'a mut Scopes<'b>);
+impl<'a, 'b> std::ops::Drop for ScopeGuard<'a, 'b> {
     fn drop(&mut self) {
         self.0.nested.pop();
     }
 }
 
-impl Scopes {
-    fn next<'a>(&'a mut self) -> ScopeGuard<'a> {
+impl<'a> Scopes<'a> {
+    fn next<'b>(&'b mut self) -> ScopeGuard<'b, 'a> {
         self.nested.push(Default::default());
         ScopeGuard(self)
     }
 
-    fn deepest_mut(&mut self) -> &mut ScopeLayer {
+    fn deepest_mut(&mut self) -> &mut ScopeLayer<'a> {
         match self.nested.last_mut() {
             Some(s) => s,
             None => &mut self.global,
         }
-    }
-
-    fn push_scope_layer(&mut self) {
-        self.nested.push(Default::default());
-    }
-
-    fn pop_scope_layer(&mut self) -> Option<ScopeLayer> {
-        self.nested.pop()
     }
 
     fn lookup_ident(&self, i: &Ident) -> Option<TypeToken> {
@@ -384,59 +383,6 @@ impl Scopes {
             Some(tup) => Some(*tup),
             None => Some(self.global.get(i.as_str()).copied()?),
         }
-    }
-}
-
-struct Context {
-    scopes: Scopes,
-    types: Types,
-}
-
-impl Context {
-    fn new() -> Context {
-        Context {
-            scopes: Default::default(),
-            types: Default::default(),
-        }
-    }
-
-    fn get_ident(&self, tok: TypeToken) -> &Ident {
-        &self.types.idents[tok.0]
-    }
-
-    // add an ident, but error if that ident already exists
-    fn push_new_ident(&mut self, i: Ident) -> Result<TypeToken, ParseError> {
-        if self.scopes.deepest_mut().contains_key(i.as_str()) {
-            Err(parse_error(
-                i.line,
-                i.col,
-                ParseErrorType::DuplicateIdentifier(i),
-            ))
-        } else {
-            let tok = self.types.add_ident(i.clone());
-            self.scopes.deepest_mut().insert(i.value, tok);
-            Ok(tok)
-        }
-    }
-
-    fn push_scope_layer(&mut self) {
-        self.scopes.push_scope_layer()
-    }
-
-    fn pop_scope_layer(&mut self) -> Option<ScopeLayer> {
-        self.scopes.pop_scope_layer()
-    }
-
-    fn lookup_ident(&self, i: &Ident) -> Option<TypeToken> {
-        self.scopes.lookup_ident(i)
-    }
-
-    fn lookup_ident_token(&self, i: &Ident) -> Option<TypeToken> {
-        self.scopes.lookup_ident(i)
-    }
-
-    fn add_link(&mut self, a: TypeToken, b: TypeToken, dir: Indirection) {
-        self.types.add_link(a, b, dir)
     }
 }
 
@@ -927,7 +873,7 @@ impl std::fmt::Display for ParseError {
 }
 
 #[derive(Debug, PartialEq, Eq, Default)]
-pub struct RawDocument {
+pub struct Document {
     base_url: Option<CompactString>,
     pub services: Vec<Service>,
     pub definitions: Vec<Definition>,
@@ -948,7 +894,7 @@ pub struct Service {
     pub procedures: Vec<Procedure>,
 }
 
-impl RawDocument {
+impl Document {
     pub fn base_url(&self) -> Option<&str> {
         self.base_url.as_deref()
     }
@@ -1083,15 +1029,21 @@ impl DefinitionRaw {
         }
     }
 
-    fn resolve_idents(
+    // validate field idents and add type associations (`links`)
+    fn resolve_idents<'a>(
         self,
-        scopes: &mut Scopes,
+        scopes: &mut Scopes<'a>,
+        idents: &'a [Ident],
         links: &mut Links,
     ) -> Result<Definition, ParseError> {
         Ok(match self {
             DefinitionRaw::Enum(e) => Definition::Enum(e),
-            DefinitionRaw::OneOf(oneof) => Definition::OneOf(oneof.resolve_idents(scopes, links)?),
-            DefinitionRaw::Message(msg) => Definition::Message(msg.resolve_idents(scopes, links)?),
+            DefinitionRaw::OneOf(oneof) => {
+                Definition::OneOf(oneof.resolve_idents(scopes, idents, links)?)
+            }
+            DefinitionRaw::Message(msg) => {
+                Definition::Message(msg.resolve_idents(scopes, idents, links)?)
+            }
         })
     }
 
@@ -1140,15 +1092,24 @@ pub struct OneOfRaw {
 }
 
 impl OneOfRaw {
-    fn resolve_idents(self, scopes: &mut Scopes, links: &mut Links) -> Result<OneOf, ParseError> {
+    fn resolve_idents<'a>(
+        self,
+        scopes: &mut Scopes<'a>,
+        idents: &'a [Ident],
+        links: &mut Links,
+    ) -> Result<OneOf, ParseError> {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
+        let scope = scopes.deepest_mut();
+        for def in self.definitions.iter() {
+            scope.insert(def.name(idents), def.token());
+        }
         Ok(OneOf {
             ident: self.ident,
             definitions: self
                 .definitions
                 .into_iter()
-                .map(|def| def.resolve_idents(scopes, links))
+                .map(|def| def.resolve_idents(scopes, idents, links))
                 .collect::<Result<_, ParseError>>()?,
             variants: self
                 .variants
@@ -1199,7 +1160,7 @@ impl OneOfVariantRaw {
     fn resolve_idents(
         self,
         oneof_token: TypeToken,
-        scopes: &mut Scopes,
+        scopes: &mut Scopes<'_>,
         links: &mut Links,
     ) -> Result<OneOfVariant, ParseError> {
         let (type_base, indirection) = match self.type_.base {
@@ -1307,21 +1268,25 @@ pub struct MessageRaw {
 }
 
 impl MessageRaw {
-    fn resolve_idents(
+    fn resolve_idents<'a>(
         self,
-        scopes: &mut Scopes,
+        scopes: &mut Scopes<'a>,
+        idents: &'a [Ident],
         links: &mut BTreeMap<(usize, usize), Indirection>,
     ) -> Result<Message, ParseError> {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
         let layer = scopes.deepest_mut();
-        // for def in
+        for def in self.definitions.iter() {
+            layer.insert(def.name(idents), def.token());
+        }
+        println!("{:?}", scopes);
         Ok(Message {
             ident: self.ident,
             definitions: self
                 .definitions
                 .into_iter()
-                .map(|def| def.resolve_idents(scopes, links))
+                .map(|def| def.resolve_idents(scopes, idents, links))
                 .collect::<Result<_, ParseError>>()?,
             fields: self
                 .fields
@@ -1388,9 +1353,8 @@ impl MessageFieldRaw {
     fn resolve_idents(
         self,
         msg_token: TypeToken,
-        scopes: &mut Scopes,
+        scopes: &mut Scopes<'_>,
         links: &mut Links,
-        // types: &mut Types,
     ) -> Result<MessageField, ParseError> {
         let (type_base, indirection) = match self.type_.base {
             TypeOrIdent::Type(t) => (TypeOrToken::Type(t), Indirection::Direct),
@@ -1454,17 +1418,6 @@ impl Types {
         let len = self.idents.len();
         self.idents.push(i);
         TypeToken(len)
-    }
-
-    fn add_link(&mut self, from: TypeToken, to: TypeToken, dir: Indirection) {
-        self.links.insert((from.0, to.0), dir);
-    }
-
-    fn direct_links_from<'a>(
-        &'a self,
-        tok: TypeToken,
-    ) -> impl Iterator<Item = TypeToken> + use<'a> {
-        direct_links_from(tok, &self.links)
     }
 }
 
