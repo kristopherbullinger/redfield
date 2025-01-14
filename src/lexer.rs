@@ -268,12 +268,6 @@ fn munch_literal_binary_number(
     }
 }
 
-fn munch_enum_value(inp: &str) -> Option<(CompactString, &str)> {
-    let rest = inp.strip_prefix('.')?;
-    let (ident, rest) = munch_ident(rest)?;
-    Some((inp[0..ident.len() + 1].into(), rest))
-}
-
 fn munch_literal_float(inp: &str) -> Result<Option<(CompactString, &str)>, ParseLiteralError> {
     let mut i = 0;
     // eat maybe sign
@@ -325,27 +319,23 @@ fn munch_literal_float(inp: &str) -> Result<Option<(CompactString, &str)>, Parse
 
 fn munch_literal(inp: &str) -> Result<Option<(Literal, &str)>, ParseLiteralError> {
     if let Some((s, rest)) = munch_literal_string(inp)? {
-        let lit = Literal::String(LiteralString(s.into()));
-        return Ok(Some((lit, rest)));
-    }
-    if let Some((ide, rest)) = munch_enum_value(inp) {
-        let lit = Literal::EnumVariant(CompactString::new(ide));
-        return Ok(Some((lit, rest)));
-    }
-    if let Some((n, rest)) = munch_literal_decimal_number(inp)? {
-        let lit = Literal::DecimalNumber(LiteralDecimalNumber(n.into()));
+        let lit = Literal::String(s.into());
         return Ok(Some((lit, rest)));
     }
     if let Some((n, rest)) = munch_literal_hex_number(inp)? {
-        let lit = Literal::HexNumber(LiteralHexNumber(n.into()));
+        let lit = Literal::HexNumber(n.into());
         return Ok(Some((lit, rest)));
     }
     if let Some((n, rest)) = munch_literal_binary_number(inp)? {
-        let lit = Literal::DecimalNumber(LiteralDecimalNumber(n.into()));
+        let lit = Literal::BinaryNumber(n.into());
+        return Ok(Some((lit, rest)));
+    }
+    if let Some((n, rest)) = munch_literal_decimal_number(inp)? {
+        let lit = Literal::DecimalNumber(n.into());
         return Ok(Some((lit, rest)));
     }
     if let Some((slc, rest)) = munch_literal_float(inp)? {
-        let lit = Literal::Float(LiteralFloat(slc.into()));
+        let lit = Literal::Float(slc.into());
         return Ok(Some((lit, rest)));
     }
     Ok(None)
@@ -486,17 +476,6 @@ impl<'s> TokenIter<'s> {
                                 self.col = 0;
                                 continue;
                             }
-                            // eat enum variant
-                            // if let Some((ide, rest)) = munch_enum_value(self.inp) {
-                            //     self.c += ide.len();
-                            //     self.inp = rest;
-                            //     let tok = token(
-                            //         self.line,
-                            //         (self.c, self.c + ide.len()),
-                            //         TokenType::EnumVariant(EnumVariant { content: ide }),
-                            //     );
-                            //     return Some(Ok(tok));
-                            // }
                             // eat ident or reserved word
                             if let Some((ide, rest)) = munch_ident(self.inp) {
                                 let tok = if let Some((_, tok)) =
@@ -561,53 +540,12 @@ pub(crate) fn lex_document_iter<'s>(inp: &'s str) -> TokenIter<'s> {
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub enum Literal {
-    DecimalNumber(LiteralDecimalNumber),
-    BinaryNumber(LiteralBinaryNumber),
-    HexNumber(LiteralHexNumber),
-    String(LiteralString),
-    Float(LiteralFloat),
-    EnumVariant(CompactString),
-    // EnumVariant(crate::Ident),
+    DecimalNumber(CompactString),
+    BinaryNumber(CompactString),
+    HexNumber(CompactString),
+    String(CompactString),
+    Float(CompactString),
     Bool(bool),
-}
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct LiteralDecimalNumber(CompactString);
-impl LiteralDecimalNumber {
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct LiteralBinaryNumber(CompactString);
-impl LiteralBinaryNumber {
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct LiteralHexNumber(CompactString);
-impl LiteralHexNumber {
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct LiteralString(pub(crate) CompactString);
-impl LiteralString {
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    pub fn new(s: &str) -> LiteralString {
-        LiteralString(CompactString::new(s))
-    }
-}
-#[derive(PartialEq, Eq, Debug, Clone)]
-pub struct LiteralFloat(CompactString);
-impl LiteralFloat {
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
 }
 
 #[derive(PartialEq, Eq, Debug)]

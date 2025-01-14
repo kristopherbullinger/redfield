@@ -178,7 +178,7 @@ fn next_not_eof(iter: &mut lexer::TokenIter<'_>) -> Result<lexer::Token, ParseEr
 fn munch_literal_string(iter: &mut lexer::TokenIter<'_>) -> Result<CompactString, ParseError> {
     let tok = next_not_eof(iter)?;
     match tok.type_ {
-        lexer::TokenType::Literal(lexer::Literal::String(s)) => Ok(s.0),
+        lexer::TokenType::Literal(lexer::Literal::String(s)) => Ok(s),
         _ => Err(parse_error(
             tok.line,
             tok.span.0,
@@ -566,7 +566,6 @@ fn munch_enum(iter: &mut lexer::TokenIter<'_>, types: &mut Types) -> Result<Enum
                                     })?,
                                 lexer::Literal::Float(_)
                                 | lexer::Literal::String(_)
-                                | lexer::Literal::EnumVariant(_)
                                 | lexer::Literal::Bool(_) => {
                                     return Err(parse_error(
                                         line,
