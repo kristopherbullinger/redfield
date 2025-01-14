@@ -123,8 +123,8 @@ pub fn parse_document_from_str(inp: &str) -> Result<Document, ParseError> {
         for def in definitions.iter_mut() {
             match *def {
                 Definition::Enum(_) => { /* enums dont allow nested definitions */ }
-                Definition::OneOf(ref mut oneof) => oneof.set_indirection(&types.links),
-                Definition::Message(ref mut msg) => msg.set_indirection(&types.links),
+                Definition::OneOf(ref mut oneof) => oneof.set_indirection(&mut types.links),
+                Definition::Message(ref mut msg) => msg.set_indirection(&mut types.links),
             }
         }
     }
@@ -1122,7 +1122,7 @@ impl OneOfRaw {
 
 impl OneOf {
     // all fields which point to `self` must be marked as requiring indirection
-    fn set_indirection(&mut self, links: &Links) {
+    fn set_indirection(&mut self, links: &mut Links) {
         for variant in self.variants.iter_mut() {
             if variant.indirection == Indirection::Indirect {
                 // it has already been determined that this field should use indirection
@@ -1134,6 +1134,7 @@ impl OneOf {
             };
             if can_reach(tok, self.ident, links) {
                 // cycle detected -- add indirection
+                links.insert((self.ident.0, tok.0), Indirection::Indirect);
                 variant.indirection = Indirection::Indirect;
             }
         }
@@ -1280,7 +1281,6 @@ impl MessageRaw {
         for def in self.definitions.iter() {
             layer.insert(def.name(idents), def.token());
         }
-        println!("{:?}", scopes);
         Ok(Message {
             ident: self.ident,
             definitions: self
@@ -1299,7 +1299,7 @@ impl MessageRaw {
 
 impl Message {
     // all fields which point to `self` must be marked as requiring indirection
-    fn set_indirection(&mut self, links: &Links) {
+    fn set_indirection(&mut self, links: &mut Links) {
         for f in self.fields.iter_mut() {
             if f.indirection == Indirection::Indirect {
                 // it has already been determined that this field should use indirection
@@ -1312,6 +1312,7 @@ impl Message {
             if can_reach(tok, self.ident, links) {
                 // cycle detected -- add indirection
                 f.indirection = Indirection::Indirect;
+                links.insert((self.ident.0, tok.0), Indirection::Indirect);
             }
         }
     }
