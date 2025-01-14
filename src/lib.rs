@@ -520,6 +520,7 @@ fn munch_enum(iter: &mut lexer::TokenIter<'_>, types: &mut Types) -> Result<Enum
     expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
     // munch { variant } [ "UNKNOWN" ] "}"
     let mut variants: Vec<EnumVariant> = vec![];
+    let mut values: HashSet<u16> = Default::default();
     let mut has_unknown = false;
     loop {
         let line = iter.line;
@@ -583,6 +584,16 @@ fn munch_enum(iter: &mut lexer::TokenIter<'_>, types: &mut Types) -> Result<Enum
                                 ));
                             }
                         };
+                        if !values.insert(value) {
+                            return Err(parse_error(
+                                line,
+                                col,
+                                ParseErrorType::DuplicateEnumVariantValue(
+                                    types.idents[type_token.0].clone(),
+                                    value,
+                                ),
+                            ));
+                        }
                         variants.push(EnumVariant {
                             ident: new_ident(tok.line, tok.span.0, name),
                             value,
@@ -739,6 +750,7 @@ impl From<lexer::ParseError> for ParseError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseErrorType {
     ExpectedTypeOrIdent,
+    DuplicateEnumVariantValue(Ident, u16),
     DuplicateFieldName(Ident),
     DuplicateFieldNumber(u16),
     DuplicateIdentifier(Ident),
@@ -801,6 +813,9 @@ impl std::fmt::Display for ParseError {
             ParseErrorType::ExpectedTypeOrIdent => write!(f, "expected type or identifier")?,
             ParseErrorType::ExpectedColonOrQuestionMark => write!(f, "expected `:` or `?`")?,
             ParseErrorType::ExpectedAtSignOrQuestionMark => write!(f, "expected `@` or `?`")?,
+            ParseErrorType::DuplicateEnumVariantValue(ref i, v) => {
+                write!(f, "duplicate variant value in enum `{}`: {}", i.as_str(), v)?
+            }
             ParseErrorType::InvalidSyntax(ref e) => match e {
                 lexer::ParseErrorType::UnexpectedEof => write!(f, "unexpected end of input")?,
                 lexer::ParseErrorType::UnknownValue => write!(f, "unknown token")?,
@@ -843,7 +858,7 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorType::ExpectedArrowOrSemicolon => write!(f, "expected `->` or `;`")?,
             ParseErrorType::ExpectedStringLiteral => write!(f, "expected a string literal")?,
-            ParseErrorType::ExpectedIdentOrRCurly => write!(f, "expected identifier or `{{`")?,
+            ParseErrorType::ExpectedIdentOrRCurly => write!(f, "expected identifier or `}}`")?,
             ParseErrorType::ExpectedServiceMessageEnumOrOneof => write!(
                 f,
                 "expected keyword `enum`, `oneof`, `message`, or`service`"
