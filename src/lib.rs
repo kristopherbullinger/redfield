@@ -99,32 +99,31 @@ pub fn parse_document_from_str(inp: &str) -> Result<Document, ParseError> {
     let services = {
         let mut toplevel_names: HashMap<&str, (TypeToken, DefinitionType)> = Default::default();
         for def in definitions_raw.iter() {
-            toplevel_names.insert(
-                def.name(&types.idents),
-                (def.token(), def.definition_type()),
-            );
+            toplevel_names.insert(def.name(&types), (def.token(), def.definition_type()));
         }
         validate_svcs(services, &toplevel_names)?
     };
     // validate idents and add type associations
     let mut scopes = {
+        // initialize the global scope with top-level idents
         let mut scopes = Scopes::default();
         for def in definitions_raw.iter() {
-            scopes.global.insert(def.name(&types.idents), def.token());
+            scopes.global.insert(def.name(&types), def.token());
         }
         scopes
     };
     let mut definitions: Vec<Definition> = vec![];
+    let mut links = Links::default();
     for def in definitions_raw {
-        definitions.push(def.resolve_idents(&mut scopes, &types.idents, &mut types.links)?);
+        definitions.push(def.resolve_idents(&mut scopes, &types, &mut links)?);
     }
     // detect recursion of user-defined types and insert indirection
     {
         for def in definitions.iter_mut() {
             match *def {
                 Definition::Enum(_) => { /* enums dont allow nested definitions */ }
-                Definition::OneOf(ref mut oneof) => oneof.set_indirection(&mut types.links),
-                Definition::Message(ref mut msg) => msg.set_indirection(&mut types.links),
+                Definition::OneOf(ref mut oneof) => oneof.set_indirection(&mut links),
+                Definition::Message(ref mut msg) => msg.set_indirection(&mut links),
             }
         }
     }
@@ -589,7 +588,7 @@ fn munch_enum(iter: &mut lexer::TokenIter<'_>, types: &mut Types) -> Result<Enum
                                 line,
                                 col,
                                 ParseErrorType::DuplicateEnumVariantValue(
-                                    types.idents[type_token.0].clone(),
+                                    types.get(type_token).clone(),
                                     value,
                                 ),
                             ));
@@ -1048,16 +1047,16 @@ impl DefinitionRaw {
     fn resolve_idents<'a>(
         self,
         scopes: &mut Scopes<'a>,
-        idents: &'a [Ident],
+        types: &'a Types,
         links: &mut Links,
     ) -> Result<Definition, ParseError> {
         Ok(match self {
             DefinitionRaw::Enum(e) => Definition::Enum(e),
             DefinitionRaw::OneOf(oneof) => {
-                Definition::OneOf(oneof.resolve_idents(scopes, idents, links)?)
+                Definition::OneOf(oneof.resolve_idents(scopes, types, links)?)
             }
             DefinitionRaw::Message(msg) => {
-                Definition::Message(msg.resolve_idents(scopes, idents, links)?)
+                Definition::Message(msg.resolve_idents(scopes, types, links)?)
             }
         })
     }
@@ -1070,11 +1069,11 @@ impl DefinitionRaw {
         }
     }
 
-    fn name<'a>(&self, ctx: &'a [Ident]) -> &'a str {
+    fn name<'a>(&self, types: &'a Types) -> &'a str {
         match self {
-            DefinitionRaw::Enum(inner) => ctx[inner.ident.0].as_str(),
-            DefinitionRaw::OneOf(inner) => ctx[inner.ident.0].as_str(),
-            DefinitionRaw::Message(inner) => ctx[inner.ident.0].as_str(),
+            DefinitionRaw::Enum(inner) => types.get(inner.ident).as_str(),
+            DefinitionRaw::OneOf(inner) => types.get(inner.ident).as_str(),
+            DefinitionRaw::Message(inner) => types.get(inner.ident).as_str(),
         }
     }
 }
@@ -1110,27 +1109,27 @@ impl OneOfRaw {
     fn resolve_idents<'a>(
         self,
         scopes: &mut Scopes<'a>,
-        idents: &'a [Ident],
+        types: &'a Types,
         links: &mut Links,
     ) -> Result<OneOf, ParseError> {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
         let scope = scopes.deepest_mut();
         for def in self.definitions.iter() {
-            scope.insert(def.name(idents), def.token());
+            scope.insert(def.name(types), def.token());
         }
         Ok(OneOf {
             ident: self.ident,
             definitions: self
                 .definitions
                 .into_iter()
-                .map(|def| def.resolve_idents(scopes, idents, links))
-                .collect::<Result<_, ParseError>>()?,
+                .map(|def| def.resolve_idents(scopes, types, links))
+                .collect::<Result<_, _>>()?,
             variants: self
                 .variants
                 .into_iter()
                 .map(|var| var.resolve_idents(self.ident, scopes, links))
-                .collect::<Result<_, ParseError>>()?,
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -1287,27 +1286,27 @@ impl MessageRaw {
     fn resolve_idents<'a>(
         self,
         scopes: &mut Scopes<'a>,
-        idents: &'a [Ident],
+        types: &'a Types,
         links: &mut BTreeMap<(usize, usize), Indirection>,
     ) -> Result<Message, ParseError> {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
         let layer = scopes.deepest_mut();
         for def in self.definitions.iter() {
-            layer.insert(def.name(idents), def.token());
+            layer.insert(def.name(types), def.token());
         }
         Ok(Message {
             ident: self.ident,
             definitions: self
                 .definitions
                 .into_iter()
-                .map(|def| def.resolve_idents(scopes, idents, links))
-                .collect::<Result<_, ParseError>>()?,
+                .map(|def| def.resolve_idents(scopes, types, links))
+                .collect::<Result<_, _>>()?,
             fields: self
                 .fields
                 .into_iter()
                 .map(|fld| fld.resolve_idents(self.ident, scopes, links))
-                .collect::<Result<_, ParseError>>()?,
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -1413,28 +1412,27 @@ impl MessageFieldRaw {
 pub struct TypeToken(usize);
 
 type Links = BTreeMap<(usize, usize), Indirection>;
+
 // append-only sink for idents of user-defined types
 #[derive(Debug, Default)]
-struct Types {
-    // TypeToken.0 is an index into this
-    idents: Vec<Ident>,
-    // type with ident at tup.0 points to type with ident at tup.1 with or
-    // without indirection
-    links: Links,
+struct Types(Vec<Ident>);
+impl Types {
+    fn add_ident(&mut self, i: Ident) -> TypeToken {
+        let len = self.0.len();
+        self.0.push(i);
+        TypeToken(len)
+    }
+
+    fn get(&self, tok: TypeToken) -> &Ident {
+        // won't panic because we don't hand out invalid tokens and we don't create any manually
+        &self.0[tok.0]
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Indirection {
     Direct,
     Indirect,
-}
-
-impl Types {
-    fn add_ident(&mut self, i: Ident) -> TypeToken {
-        let len = self.idents.len();
-        self.idents.push(i);
-        TypeToken(len)
-    }
 }
 
 fn direct_links_from<'a>(
