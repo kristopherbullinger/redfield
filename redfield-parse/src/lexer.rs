@@ -19,8 +19,8 @@ pub enum TokenType {
     Colon,
     Semicolon,
     Equals,
-    Comment(Comment),
-    Whitespace(Whitespace),
+    // Comment(Comment),
+    // Whitespace(Whitespace),
     Ident(CompactString),
     // Ident(crate::Ident),
     BaseType(crate::BaseType),
@@ -28,7 +28,6 @@ pub enum TokenType {
     KeywordMessage,
     KeywordOneof,
     KeywordService,
-    KeywordNull,
     AtSign,
     Verb(crate::Verb),
     True,
@@ -51,15 +50,14 @@ impl TokenType {
             TokenType::Colon => "`:`",
             TokenType::Semicolon => "`;`",
             TokenType::Equals => "`=`",
-            TokenType::Comment(_) => "a comment",
-            TokenType::Whitespace(_) => "whitespace",
+            // TokenType::Comment(_) => "a comment",
+            // TokenType::Whitespace(_) => "whitespace",
             TokenType::Ident(_) => "an identifier",
             TokenType::BaseType(_) => "a type",
             TokenType::KeywordEnum => "keyword `enum`",
             TokenType::KeywordMessage => "keyword `message`",
             TokenType::KeywordOneof => "keyword `oneof`",
             TokenType::KeywordService => "keyword `service`",
-            TokenType::KeywordNull => "keyword `null`",
             TokenType::AtSign => "`@`",
             TokenType::Verb(ref vb) => match vb {
                 crate::Verb::Get => "keyword `GET`",
@@ -78,32 +76,14 @@ pub struct EnumVariant {
     content: CompactString,
 }
 
-impl EnumVariant {
-    pub fn content(&self) -> &str {
-        self.content.as_str()
-    }
-}
-
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Comment {
     content: CompactString,
 }
 
-impl Comment {
-    pub fn content(&self) -> &str {
-        self.content.as_str()
-    }
-}
-
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Whitespace {
     content: CompactString,
-}
-
-impl Whitespace {
-    pub fn content(&self) -> &str {
-        self.content.as_str()
-    }
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -186,7 +166,7 @@ fn munch_literal_string(inp: &str) -> Result<Option<(CompactString, &str)>, Pars
                 escaping = false;
             }
             Some(c) if escaping => {
-                return Err(ParseLiteralError::InvalidEscape(c as char));
+                return Err(ParseLiteralError::InvalidEscape(c));
             }
             Some('"') => return Ok(Some((scratch, iter.as_str()))),
             Some(c) => scratch.push(c),
@@ -202,13 +182,8 @@ fn munch_literal_decimal_number(
     if let Some(b'-' | b'+') = inp.as_bytes().first().copied() {
         i += 1;
     }
-    loop {
-        match inp[i..].as_bytes() {
-            [b'0'..=b'9', ..] => {
-                i += 1;
-            }
-            _ => break,
-        }
+    while let Some(b'0'..=b'9') = inp.as_bytes().get(i).copied() {
+        i += 1;
     }
     if i > 0 {
         Ok(Some((inp[..i].into(), &inp[i..])))
@@ -226,14 +201,8 @@ fn munch_literal_hex_number(inp: &str) -> Result<Option<(CompactString, &str)>, 
         return Ok(None);
     };
     i += 2; // "0x"
-    loop {
-        match inp.as_bytes().get(i) {
-            Some(&b) => match b {
-                b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => i += 1,
-                _ => break,
-            },
-            None => break,
-        }
+    while let Some(b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F') = inp.as_bytes().get(i) {
+        i += 1;
     }
     if i > 0 {
         Ok(Some((inp[..i].into(), &inp[i..])))
@@ -250,16 +219,8 @@ fn munch_literal_binary_number(
         return Ok(None);
     };
     i += 2; // "0b"
-    loop {
-        match inp.as_bytes().get(i) {
-            Some(&b) => match b {
-                b'0' | b'1' => {
-                    i += 1;
-                }
-                _ => break,
-            },
-            None => break,
-        }
+    while let Some(b'1' | b'0') = inp.as_bytes().get(i) {
+        i += 1;
     }
     if i > 0 {
         Ok(Some((inp[..i].into(), &inp[i..])))
@@ -271,14 +232,14 @@ fn munch_literal_binary_number(
 fn munch_literal_float(inp: &str) -> Result<Option<(CompactString, &str)>, ParseLiteralError> {
     let mut i = 0;
     // eat maybe sign
-    if let Some(b'-' | b'+') = inp.as_bytes().get(0).copied() {
+    if let Some(b'-' | b'+') = inp.as_bytes().first().copied() {
         i += 1;
     }
     //eat numbers, decimal, and more numbers
     let mut found_decimal = false;
     loop {
         match inp[i..].as_bytes().get(i).copied() {
-            Some(c) if c >= b'0' && c <= b'9' => {
+            Some(c) if c.is_ascii_digit() => {
                 i += 1;
             }
             Some(b'.') => {
@@ -293,12 +254,12 @@ fn munch_literal_float(inp: &str) -> Result<Option<(CompactString, &str)>, Parse
             None => break,
         }
     }
-    if let Some(b'e' | b'E') = inp[i..].as_bytes().get(0).copied() {
+    if let Some(b'e' | b'E') = inp[i..].as_bytes().first().copied() {
         i += 1;
         let mut exp_i = 0;
         loop {
             match inp.as_bytes().get(i + exp_i).copied() {
-                Some(c) if c >= b'0' && c <= b'9' => {
+                Some(c) if c.is_ascii_digit() => {
                     exp_i += 1;
                 }
                 Some(_) | None => break,
@@ -319,23 +280,23 @@ fn munch_literal_float(inp: &str) -> Result<Option<(CompactString, &str)>, Parse
 
 fn munch_literal(inp: &str) -> Result<Option<(Literal, &str)>, ParseLiteralError> {
     if let Some((s, rest)) = munch_literal_string(inp)? {
-        let lit = Literal::String(s.into());
+        let lit = Literal::String(s);
         return Ok(Some((lit, rest)));
     }
     if let Some((n, rest)) = munch_literal_hex_number(inp)? {
-        let lit = Literal::HexNumber(n.into());
+        let lit = Literal::HexNumber(n);
         return Ok(Some((lit, rest)));
     }
     if let Some((n, rest)) = munch_literal_binary_number(inp)? {
-        let lit = Literal::BinaryNumber(n.into());
+        let lit = Literal::BinaryNumber(n);
         return Ok(Some((lit, rest)));
     }
     if let Some((n, rest)) = munch_literal_decimal_number(inp)? {
-        let lit = Literal::DecimalNumber(n.into());
+        let lit = Literal::DecimalNumber(n);
         return Ok(Some((lit, rest)));
     }
     if let Some((slc, rest)) = munch_literal_float(inp)? {
-        let lit = Literal::Float(slc.into());
+        let lit = Literal::Float(slc);
         return Ok(Some((lit, rest)));
     }
     Ok(None)
@@ -343,10 +304,6 @@ fn munch_literal(inp: &str) -> Result<Option<(Literal, &str)>, ParseLiteralError
 
 fn token(line: usize, span: (usize, usize), type_: TokenType) -> Token {
     Token { line, span, type_ }
-}
-
-pub fn lex_document(inp: &str) -> Result<Vec<Token>, ParseError> {
-    TokenIter::new(inp).collect::<Result<Vec<_>, _>>()
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -498,19 +455,16 @@ impl<'s> TokenIter<'s> {
                                 return Some(Ok(tok));
                             }
                             // eat literal
-                            match munch_literal(self.inp) {
-                                Ok(Some((lit, rest))) => {
-                                    let token_len = self.inp.len() - rest.len();
-                                    let tok = token(
-                                        self.line,
-                                        (self.col, self.col + token_len),
-                                        TokenType::Literal(lit),
-                                    );
-                                    self.inp = rest;
-                                    self.col += token_len;
-                                    return Some(Ok(tok));
-                                }
-                                _ => {}
+                            if let Ok(Some((lit, rest))) = munch_literal(self.inp) {
+                                let token_len = self.inp.len() - rest.len();
+                                let tok = token(
+                                    self.line,
+                                    (self.col, self.col + token_len),
+                                    TokenType::Literal(lit),
+                                );
+                                self.inp = rest;
+                                self.col += token_len;
+                                return Some(Ok(tok));
                             }
 
                             return Some(Err(ParseError {
@@ -534,7 +488,7 @@ impl<'s> Iterator for TokenIter<'s> {
     }
 }
 
-pub(crate) fn lex_document_iter<'s>(inp: &'s str) -> TokenIter<'s> {
+pub(crate) fn lex_document_iter(inp: &str) -> TokenIter<'_> {
     TokenIter::new(inp)
 }
 
@@ -545,7 +499,6 @@ pub enum Literal {
     HexNumber(CompactString),
     String(CompactString),
     Float(CompactString),
-    Bool(bool),
 }
 
 #[derive(PartialEq, Eq, Debug)]
