@@ -10,10 +10,10 @@ pub struct Token {
 pub enum TokenType {
     LParen,
     RParen,
-    LBracket,
-    RBracket,
     LCurly,
     RCurly,
+    LAngleBracket,
+    RAngleBracket,
     QuestionMark,
     Comma,
     Colon,
@@ -22,12 +22,12 @@ pub enum TokenType {
     // Comment(Comment),
     // Whitespace(Whitespace),
     Ident(CompactString),
-    // Ident(crate::Ident),
     BaseType(crate::BaseType),
     KeywordEnum,
     KeywordMessage,
     KeywordOneof,
     KeywordService,
+    KeywordList,
     AtSign,
     Verb(crate::Verb),
     True,
@@ -41,8 +41,8 @@ impl TokenType {
         match *self {
             TokenType::LParen => "`(`",
             TokenType::RParen => "`)`",
-            TokenType::LBracket => "`[`",
-            TokenType::RBracket => "`]`",
+            TokenType::LAngleBracket => "`<`",
+            TokenType::RAngleBracket => "`>`",
             TokenType::LCurly => "`{`",
             TokenType::RCurly => "`}`",
             TokenType::QuestionMark => "`?`",
@@ -58,6 +58,7 @@ impl TokenType {
             TokenType::KeywordMessage => "keyword `message`",
             TokenType::KeywordOneof => "keyword `oneof`",
             TokenType::KeywordService => "keyword `service`",
+            TokenType::KeywordList => "keyword `List`",
             TokenType::AtSign => "`@`",
             TokenType::Verb(ref vb) => match vb {
                 crate::Verb::Get => "keyword `GET`",
@@ -101,6 +102,7 @@ static KEYWORDS_TOKENS: &[(&str, TokenType)] = &[
     ("message", TokenType::KeywordMessage),
     ("true", TokenType::True),
     ("false", TokenType::False),
+    ("List", TokenType::KeywordList),
     ("GET", TokenType::Verb(crate::Verb::Get)),
     ("POST", TokenType::Verb(crate::Verb::Post)),
 ];
@@ -358,16 +360,22 @@ impl<'s> TokenIter<'s> {
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
-                        b'[' => {
-                            let tok =
-                                token(self.line, (self.col, self.col + 1), TokenType::LBracket);
+                        b'<' => {
+                            let tok = token(
+                                self.line,
+                                (self.col, self.col + 1),
+                                TokenType::LAngleBracket,
+                            );
                             self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));
                         }
-                        b']' => {
-                            let tok =
-                                token(self.line, (self.col, self.col + 1), TokenType::RBracket);
+                        b'>' => {
+                            let tok = token(
+                                self.line,
+                                (self.col, self.col + 1),
+                                TokenType::RAngleBracket,
+                            );
                             self.col += 1;
                             self.inp = &self.inp[1..];
                             return Some(Ok(tok));

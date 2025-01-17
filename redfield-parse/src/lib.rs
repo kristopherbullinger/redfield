@@ -26,8 +26,12 @@ pub struct Document {
     pub base_url: Option<String>,
     /// The services and their procedures defined in the document.
     pub services: Vec<Service>,
-    /// A list of user-authored types defined at the top-level of the document.
-    pub definitions: Vec<Definition>,
+    /// A list of top-level user-authored messages in the document.
+    pub messages: Vec<Message>,
+    /// A list of top-level user-authored oneofs in the document.
+    pub oneofs: Vec<OneOf>,
+    /// A list of top-level user-authored messages in the document.
+    pub enums: Vec<Enum>,
 }
 
 /// A service is a group of procedures hosted at a single URL.
@@ -55,14 +59,6 @@ pub enum Verb {
     Post,
 }
 
-/// A definitions is a user-defined type.
-#[derive(Debug)]
-pub enum Definition {
-    Enum(Enum),
-    OneOf(OneOf),
-    Message(Message),
-}
-
 /// An Enum is a C-like enum, with each variant having a single integer value. It optionally also has an `UNKNOWN`
 /// variant for capturing values not specified in the source document.
 #[derive(Debug)]
@@ -82,7 +78,12 @@ pub struct EnumVariant {
 #[derive(Debug)]
 pub struct OneOf {
     pub name: Ident,
-    pub definitions: Vec<Definition>,
+    /// A list of top-level user-authored messages in this OneOf.
+    pub messages: Vec<Message>,
+    /// A list of top-level user-authored oneofs in this OneOf.
+    pub oneofs: Vec<OneOf>,
+    /// A list of top-level user-authored messages in this OneOf.
+    pub enums: Vec<Enum>,
     pub variants: Vec<OneOfVariant>,
 }
 
@@ -96,20 +97,22 @@ pub struct OneOfVariant {
     pub indirection: Indirection,
 }
 
-/// A series of modifiers or wrappers that apply to a type.
+/// A series of modifiers or wrappers that apply to a type, with the outermost container
+/// appearing first.
 #[derive(Debug)]
-pub struct Modifiers(smallvec::SmallVec<[ListSize; 4]>);
+pub struct Containers(smallvec::SmallVec<[Container; 4]>);
 
-impl Modifiers {
-    pub fn as_slice(&self) -> &[ListSize] {
+impl Containers {
+    pub fn as_slice(&self) -> &[Container] {
         self.0.as_slice()
     }
 }
 
 #[derive(Debug)]
 pub struct Type {
-    /// A series of modifiers to apply to this type. For example, the type `[][3]u16` contains two "list" modifiers.
-    pub modifiers: Modifiers,
+    /// A series of wrappers or container types around this type, with the outermost container appearing first.
+    /// For example, the type `List<List<u16; 3>>` contains two list containers: `[UnsizedList, SizedList(3)]`
+    pub containers: Containers,
     /// The inner type to which all modifiers are applied.
     pub base: BaseOrUser,
 }
@@ -144,26 +147,30 @@ pub enum BaseType {
     I64,
     String,
     Bytes,
-    List,
-    SizedList(usize),
     Null,
 }
 
-/// List types may be with or without a size.
+/// Container types which wrap around a base or user [Type](crate::Type), with outermost containers appearing first.
+/// For example, the type `List<List<u16; 3>>` is type u16 with containers `[UnsizedList, SizedList(3)]`.
 #[derive(Debug, PartialEq, Eq)]
-pub enum ListSize {
-    /// The list has no specified size, ie `[]u16`.
-    Unsized,
-    /// The list has a specified size, ie `[3]u16`.
-    Sized(usize),
+pub enum Container {
+    /// The list has no specified size, ie `List<u16>`.
+    UnsizedList,
+    /// The list has a specified size, ie `List<u16; 3>`.
+    SizedList(usize),
 }
 
 /// A basic, compound, struct- or object-like user-defined type.
 #[derive(Debug)]
 pub struct Message {
     pub name: Ident,
-    /// User type definitions nested in this message.
-    pub definitions: Vec<Definition>,
+    /// A list of user-authored messages nested in this Message.
+    pub messages: Vec<Message>,
+    /// A list of user-authored oneofs nested in this Message.
+    pub oneofs: Vec<OneOf>,
+    /// A list of user-authored messages nested in this Message.
+    pub enums: Vec<Enum>,
+    /// This message's fields.
     pub fields: Vec<MessageField>,
 }
 

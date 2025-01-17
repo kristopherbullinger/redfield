@@ -1,0 +1,99 @@
+message RedfieldDocument {
+	base_url@0?: string,
+	messages@1: List<Message>,
+	oneofs@2: List<OneOf>,
+	enums@3: List<Enum>,
+	services@4: List<Service>,
+}
+
+message Message {
+	message MessageField {
+		name@0: string,
+		field_number@1: u16,
+		type@2: Type,
+		optional@3: bool,
+		indirection@4: Indirection,
+	}
+	name@0: string,
+	fields@1: List<MessageField>,
+	messages@2: List<Message>,
+	oneofs@3: List<OneOf>,
+	enums@4: List<Enum>,
+}
+
+message OneOf {
+	message OneOfVariant {
+		name@0: string,
+		field_number@1: u16,
+		type@2: Type,
+		indirection@3: Indirection,
+	}
+	name@0: string,
+	variants@1: List<OneOfVariant>,
+	messages@2: List<Message>,
+	oneofs@3: List<OneOf>,
+	enums@4: List<Enum>,
+}
+
+message Enum {
+	message EnumVariant {
+		name@0: string,
+		value@1: u16,
+	}
+	name@0: string,
+	variants@1: List<EnumVariant>,
+	has_unknown@2: bool,
+}
+
+enum Indirection {
+	Direct = 0,
+	Indirect = 1,
+}
+
+message Type {
+	oneof Wrapper {
+		unsized_list@0: null,
+		sized_list@1: u32,
+	}
+	oneof BaseOrUserType {
+		base@0: BaseType,
+		// the name of a user-defined message, oneof, or enum
+		user@1: string,
+	}
+	wrappers@0: List<Wrapper>,
+	base@1: BaseOrUserType,
+}
+
+enum BaseType {
+	Bool = 0,
+	U8 = 1,
+	I8 = 2,
+	U16 = 3,
+	I16 = 4,
+	U32 = 5,
+	I32 = 6,
+	U64 = 7,
+	I64 = 8,
+	String = 9,
+	Bytes = 10,
+	Null = 11,
+}
+
+message Service {
+	name@0: string,
+	procedures@1: List<Procedure>,
+}
+
+enum Verb {
+	Get = 0,
+	Post = 1,
+}
+
+message Procedure {
+	verb@0: Verb,
+	name@1: string,
+	// the name of a user-defined message type
+	input@2?: string,	
+ 	// the name of a user-defined message type
+	output@3?: string,
+}

@@ -5,15 +5,17 @@ use std::{
 
 use crate::lexer;
 use crate::BaseType;
+use crate::Container;
 use crate::Indirection;
-use crate::ListSize;
 use crate::Verb;
 use compact_str::CompactString;
 use smallvec::SmallVec;
 
+const MAX_FIELD_NUMBER: u16 = u16::MAX >> 3;
+
 fn to_type(type_: TypeRaw) -> crate::Type {
     crate::Type {
-        modifiers: crate::Modifiers(type_.modifiers),
+        containers: crate::Containers(type_.containers),
         base: match type_.base {
             BaseOrUser::Base(t) => crate::BaseOrUser::Base(t),
             BaseOrUser::User(i, _) => crate::BaseOrUser::User(crate::Ident(i.value)),
@@ -21,50 +23,97 @@ fn to_type(type_: TypeRaw) -> crate::Type {
     }
 }
 
-fn to_definition(def: DefinitionRaw) -> crate::Definition {
-    match def {
-        DefinitionRaw::Enum(e) => crate::Definition::Enum(crate::Enum {
-            name: crate::Ident(e.ident.value),
-            variants: e
-                .variants
-                .into_iter()
-                .map(|var| crate::EnumVariant {
-                    name: crate::Ident(var.ident.value),
-                    value: var.value,
-                })
-                .collect(),
-            has_unknown: e.has_unknown,
-        }),
-        DefinitionRaw::OneOf(oneof) => crate::Definition::OneOf(crate::OneOf {
-            name: crate::Ident(oneof.ident.value),
-            definitions: oneof.definitions.into_iter().map(to_definition).collect(),
-            variants: oneof
-                .variants
-                .into_iter()
-                .map(|var| crate::OneOfVariant {
-                    name: crate::Ident(var.ident.value),
-                    field_number: var.field_number,
-                    type_: to_type(var.type_),
-                    indirection: var.indirection,
-                })
-                .collect(),
-        }),
-        DefinitionRaw::Message(msg) => crate::Definition::Message(crate::Message {
-            name: crate::Ident(msg.ident.value),
-            definitions: msg.definitions.into_iter().map(to_definition).collect(),
-            fields: msg
-                .fields
-                .into_iter()
-                .map(|fld| crate::MessageField {
-                    name: crate::Ident(fld.ident.value),
-                    field_number: fld.field_number,
-                    type_: to_type(fld.type_),
-                    optional: fld.optional,
-                    indirection: fld.indirection,
-                })
-                .collect(),
-        }),
+fn to_enum(e: Enum) -> crate::Enum {
+    crate::Enum {
+        name: crate::Ident(e.ident.value),
+        variants: e
+            .variants
+            .into_iter()
+            .map(|var| crate::EnumVariant {
+                name: crate::Ident(var.ident.value),
+                value: var.value,
+            })
+            .collect(),
+        has_unknown: e.has_unknown,
     }
+}
+
+fn to_oneof(oneof: OneOfRaw) -> crate::OneOf {
+    crate::OneOf {
+        name: crate::Ident(oneof.ident.value),
+
+        variants: oneof
+            .variants
+            .into_iter()
+            .map(|var| crate::OneOfVariant {
+                name: crate::Ident(var.ident.value),
+                field_number: var.field_number,
+                type_: to_type(var.type_),
+                indirection: var.indirection,
+            })
+            .collect(),
+        messages: oneof.messages.into_iter().map(to_message).collect(),
+        oneofs: oneof.oneofs.into_iter().map(to_oneof).collect(),
+        enums: oneof.enums.into_iter().map(to_enum).collect(),
+    }
+}
+
+fn to_message(msg: MessageRaw) -> crate::Message {
+    crate::Message {
+        name: crate::Ident(msg.ident.value),
+
+        fields: msg
+            .fields
+            .into_iter()
+            .map(|fld| crate::MessageField {
+                name: crate::Ident(fld.ident.value),
+                field_number: fld.field_number,
+                type_: to_type(fld.type_),
+                optional: fld.optional,
+                indirection: fld.indirection,
+            })
+            .collect(),
+        messages: msg.messages.into_iter().map(to_message).collect(),
+        oneofs: msg.oneofs.into_iter().map(to_oneof).collect(),
+        enums: msg.enums.into_iter().map(to_enum).collect(),
+    }
+}
+
+// checks for uniqueness of the names of all user types
+fn unique_names<'a>(
+    enms: &'a [Enum],
+    oneofs: &'a [OneOfRaw],
+    messages: &'a [MessageRaw],
+) -> Result<(), ParseError> {
+    let mut names = HashSet::<&str>::new();
+    for item in enms {
+        if !names.insert(item.ident.value.as_str()) {
+            return Err(parse_error(
+                item.ident.line,
+                item.ident.col,
+                ParseErrorType::DuplicateIdentifier(item.ident.clone()),
+            ));
+        }
+    }
+    for item in oneofs {
+        if !names.insert(item.ident.value.as_str()) {
+            return Err(parse_error(
+                item.ident.line,
+                item.ident.col,
+                ParseErrorType::DuplicateIdentifier(item.ident.clone()),
+            ));
+        }
+    }
+    for item in messages {
+        if !names.insert(item.ident.value.as_str()) {
+            return Err(parse_error(
+                item.ident.line,
+                item.ident.col,
+                ParseErrorType::DuplicateIdentifier(item.ident.clone()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn to_document(doc: Document) -> crate::Document {
@@ -84,14 +133,12 @@ fn to_document(doc: Document) -> crate::Document {
                 .collect(),
         })
     }
-    let mut definitions: Vec<crate::Definition> = vec![];
-    for def in doc.definitions {
-        definitions.push(to_definition(def));
-    }
     crate::Document {
         base_url: doc.base_url.map(|s| s.into_string()),
         services,
-        definitions,
+        messages: doc.messages.into_iter().map(to_message).collect(),
+        oneofs: doc.oneofs.into_iter().map(to_oneof).collect(),
+        enums: doc.enums.into_iter().map(to_enum).collect(),
     }
 }
 
@@ -102,14 +149,13 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
         return Ok(crate::Document {
             base_url: None,
             services: vec![],
-            definitions: vec![],
+            messages: vec![],
+            oneofs: vec![],
+            enums: vec![],
         });
     };
 
     let mut tok = tok?;
-    let mut definitions: Vec<DefinitionRaw> = vec![];
-    let mut services: Vec<ServiceRaw> = vec![];
-    let mut types = TokenGenerator::default();
     // parse top-level identifiers
     loop {
         match tok.type_ {
@@ -134,12 +180,19 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
                 return Ok(crate::Document {
                     base_url: base_url.map(|s| s.into_string()),
                     services: vec![],
-                    definitions: vec![],
+                    messages: vec![],
+                    oneofs: vec![],
+                    enums: vec![],
                 });
             }
         }
     }
     // parse the rest of the document
+    let mut messages: Vec<MessageRaw> = vec![];
+    let mut oneofs: Vec<OneOfRaw> = vec![];
+    let mut enums: Vec<Enum> = vec![];
+    let mut services: Vec<ServiceRaw> = vec![];
+    let mut token_gen = TokenGenerator::default();
     loop {
         match tok.type_ {
             lexer::TokenType::Ident(ide) => {
@@ -156,16 +209,16 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
                 services.push(svc);
             }
             lexer::TokenType::KeywordMessage => {
-                let msg = munch_message(&mut iter, &mut types)?;
-                definitions.push(DefinitionRaw::Message(msg));
+                let msg = munch_message(&mut iter, &mut token_gen)?;
+                messages.push(msg);
             }
             lexer::TokenType::KeywordEnum => {
-                let enm = munch_enum(&mut iter, &mut types)?;
-                definitions.push(DefinitionRaw::Enum(enm));
+                let enm = munch_enum(&mut iter, &mut token_gen)?;
+                enums.push(enm);
             }
             lexer::TokenType::KeywordOneof => {
-                let oneof = munch_oneof(&mut iter, &mut types)?;
-                definitions.push(DefinitionRaw::OneOf(oneof));
+                let oneof = munch_oneof(&mut iter, &mut token_gen)?;
+                oneofs.push(oneof);
             }
             _ => {
                 return Err(parse_error(
@@ -182,11 +235,18 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
             }
         }
     }
+    unique_names(&enums, &oneofs, &messages)?;
     // ensure service names don't collide with data definition names and validate svc inp/outputs
     {
         let mut toplevel_names: HashMap<&str, DefinitionType> = Default::default();
-        for def in definitions.iter() {
-            toplevel_names.insert(def.name_as_str(), def.definition_type());
+        for msg in messages.iter() {
+            toplevel_names.insert(msg.ident.value.as_str(), DefinitionType::Message);
+        }
+        for oneof in oneofs.iter() {
+            toplevel_names.insert(oneof.ident.value.as_str(), DefinitionType::OneOf);
+        }
+        for enm in enums.iter() {
+            toplevel_names.insert(enm.ident.value.as_str(), DefinitionType::Enum);
         }
         validate_svcs(&services, &toplevel_names)?
     };
@@ -195,45 +255,47 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
     let mut scopes = {
         // initialize the global scope with top-level idents
         let mut scopes = Scopes::default();
-        for def in definitions.iter() {
-            scopes.global.insert(def.name(), def.token());
+        for msg in messages.iter() {
+            scopes.global.insert(msg.ident.value.clone(), msg.token);
+        }
+        for oneof in oneofs.iter() {
+            scopes.global.insert(oneof.ident.value.clone(), oneof.token);
+        }
+        for enm in enums.iter() {
+            scopes.global.insert(enm.ident.value.clone(), enm.token);
         }
         scopes
     };
+    // do field types point to valid user-defined types? if they do,
+    // record associations between the definition and pointed-to types
     let mut links = Links::default();
-    for def in definitions.iter_mut() {
-        // do field types point to valid user-defined types? if they do,
-        // record associations between the definition and pointed-to types
-        def.validate_fields_and_insert_links(&mut scopes, &mut links)?;
+    for msg in messages.iter_mut() {
+        msg.validate_fields_and_insert_links(&mut scopes, &mut links)?;
     }
-    // println!("{:?}", definitions);
-    // println!("{:?}", links);
+    for oneof in oneofs.iter_mut() {
+        oneof.validate_fields_and_insert_links(&mut scopes, &mut links)?;
+    }
     // detect recursion of user-defined types and insert indirection
     {
-        for def in definitions.iter_mut() {
-            match *def {
-                DefinitionRaw::Enum(_) => { /* enums dont allow nested definitions */ }
-                DefinitionRaw::OneOf(ref mut oneof) => {
-                    let target = oneof.token;
-                    for var in oneof.variants.iter_mut() {
-                        if let (Indirection::Direct, BaseOrUser::User(_, tok)) =
-                            (var.indirection, &var.type_.base)
-                        {
-                            let start = *tok;
-                            insert_indirection(start, target, &mut var.indirection, &mut links);
-                        }
-                    }
+        for msg in messages.iter_mut() {
+            let target = msg.token;
+            for field in msg.fields.iter_mut() {
+                if let (Indirection::Direct, BaseOrUser::User(_, tok)) =
+                    (field.indirection, &field.type_.base)
+                {
+                    let start = *tok;
+                    insert_indirection(start, target, &mut field.indirection, &mut links);
                 }
-                DefinitionRaw::Message(ref mut msg) => {
-                    let target = msg.token;
-                    for field in msg.fields.iter_mut() {
-                        if let (Indirection::Direct, BaseOrUser::User(_, tok)) =
-                            (field.indirection, &field.type_.base)
-                        {
-                            let start = *tok;
-                            insert_indirection(start, target, &mut field.indirection, &mut links);
-                        }
-                    }
+            }
+        }
+        for oneof in oneofs.iter_mut() {
+            let target = oneof.token;
+            for var in oneof.variants.iter_mut() {
+                if let (Indirection::Direct, BaseOrUser::User(_, tok)) =
+                    (var.indirection, &var.type_.base)
+                {
+                    let start = *tok;
+                    insert_indirection(start, target, &mut var.indirection, &mut links);
                 }
             }
         }
@@ -241,7 +303,9 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
     let doc = Document {
         base_url,
         services,
-        definitions,
+        messages,
+        oneofs,
+        enums,
     };
     Ok(to_document(doc))
 }
@@ -398,37 +462,19 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<ServiceRaw, ParseErr
     }
 }
 
-// assumes "[" already munched
-fn munch_list_size(iter: &mut lexer::TokenIter<'_>) -> Result<Option<usize>, ParseError> {
-    let tok = next_not_eof(iter)?;
-    match tok.type_ {
-        lexer::TokenType::RBracket => Ok(None),
-        lexer::TokenType::Literal(lexer::Literal::DecimalNumber(d)) => {
-            let sz = d.as_str().parse().map_err(|_| {
-                parse_error(tok.line, tok.span.0, ParseErrorType::IntegerParseError)
-            })?;
-            expect_next_equals(iter, lexer::TokenType::RBracket)?;
-            Ok(Some(sz))
-        }
-        _ => Err(parse_error(
-            tok.line,
-            tok.span.0,
-            ParseErrorType::ExpectedRBracketOrNumber,
-        )),
-    }
-}
-
 fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<TypeRaw, ParseError> {
-    let mut modifiers = SmallVec::<[ListSize; 4]>::new();
+    // series of containers around the base type, with outermost appearing first
+    let mut containers = SmallVec::<[Container; 4]>::new();
+    enum StackItem {
+        CloseList,
+    }
+    let mut queue: Vec<StackItem> = Default::default();
     let base = loop {
         let tok = next_not_eof(iter)?;
         match tok.type_ {
-            lexer::TokenType::LBracket => {
-                let sz = munch_list_size(&mut *iter)?;
-                modifiers.push(match sz {
-                    None => ListSize::Unsized,
-                    Some(s) => ListSize::Sized(s),
-                });
+            lexer::TokenType::KeywordList => {
+                expect_next_equals(&mut *iter, lexer::TokenType::LAngleBracket)?;
+                queue.push(StackItem::CloseList);
             }
             lexer::TokenType::Ident(i) => {
                 // UNRESOLVED overwritten later after type checking
@@ -441,12 +487,35 @@ fn munch_type(iter: &mut lexer::TokenIter<'_>) -> Result<TypeRaw, ParseError> {
                 return Err(parse_error(
                     tok.line,
                     tok.span.0,
-                    ParseErrorType::ExpectedLBracketTypeOrIdent,
+                    ParseErrorType::ExpectedSemicolonOrRightAngleBracket,
                 ))
             }
         }
     };
-    Ok(TypeRaw { modifiers, base })
+    while let Some(item) = queue.pop() {
+        let tok = next_not_eof(iter)?;
+        match item {
+            StackItem::CloseList => match tok.type_ {
+                lexer::TokenType::Semicolon => {
+                    let sz = munch_decimal_number(&mut *iter)?;
+                    containers.push(Container::SizedList(sz.val));
+                    expect_next_equals(iter, lexer::TokenType::RAngleBracket)?;
+                }
+                lexer::TokenType::RAngleBracket => {
+                    containers.push(Container::UnsizedList);
+                }
+                _ => {
+                    return Err(parse_error(
+                        tok.line,
+                        tok.span.0,
+                        ParseErrorType::ExpectedSemicolonOrRightAngleBracket,
+                    ))
+                }
+            },
+        }
+    }
+    containers.reverse();
+    Ok(TypeRaw { containers, base })
 }
 
 struct WithPosition<T> {
@@ -473,6 +542,18 @@ fn munch_decimal_number<T: FromStr>(
             ParseErrorType::ExpectedIntegerLiteral,
         )),
     }
+}
+
+fn munch_field_number(iter: &mut lexer::TokenIter<'_>) -> Result<WithPosition<u16>, ParseError> {
+    let f = munch_decimal_number::<u16>(iter)?;
+    if f.val > MAX_FIELD_NUMBER {
+        return Err(parse_error(
+            f.line,
+            f.span.0,
+            ParseErrorType::FieldNumberTooLarge(f.val),
+        ));
+    }
+    Ok(f)
 }
 
 type ScopeLayer = HashMap<CompactString, Token>;
@@ -523,7 +604,9 @@ fn munch_message(
 ) -> Result<MessageRaw, ParseError> {
     let ident = munch_ident(&mut *iter)?;
     let token = token_gen.next();
-    let mut definitions: Vec<DefinitionRaw> = vec![];
+    let mut messages: Vec<MessageRaw> = vec![];
+    let mut oneofs: Vec<OneOfRaw> = vec![];
+    let mut enums: Vec<Enum> = vec![];
     let mut fields: Vec<MessageFieldRaw> = vec![];
     // test for field number uniqueness
     let mut field_numbers = HashSet::new();
@@ -533,22 +616,22 @@ fn munch_message(
         match tok.type_ {
             lexer::TokenType::KeywordEnum => {
                 let enm = munch_enum(&mut *iter, &mut *token_gen)?;
-                definitions.push(DefinitionRaw::Enum(enm));
+                enums.push(enm);
             }
             lexer::TokenType::KeywordOneof => {
                 let oneof = munch_oneof(&mut *iter, &mut *token_gen)?;
-                definitions.push(DefinitionRaw::OneOf(oneof));
+                oneofs.push(oneof);
             }
             lexer::TokenType::KeywordMessage => {
                 let msg = munch_message(&mut *iter, &mut *token_gen)?;
-                definitions.push(DefinitionRaw::Message(msg))
+                messages.push(msg);
             }
             lexer::TokenType::Ident(name) => {
                 let ident = new_ident(tok.line, tok.span.0, name);
                 // ident@4?:
                 expect_next_equals(&mut *iter, lexer::TokenType::AtSign)?;
                 let field_number = {
-                    let munched = munch_decimal_number(&mut *iter)?;
+                    let munched = munch_field_number(&mut *iter)?;
                     let num = munched.val;
                     // check duplicated field number
                     if !field_numbers.insert(num) {
@@ -578,9 +661,9 @@ fn munch_message(
                 }
                 let type_ = munch_type(&mut *iter)?;
                 let indirection = if type_
-                    .modifiers
+                    .containers
                     .iter()
-                    .any(|m| matches!(m, ListSize::Unsized))
+                    .any(|m| matches!(m, Container::UnsizedList))
                 {
                     Indirection::Indirect
                 } else {
@@ -607,10 +690,13 @@ fn munch_message(
                         ));
                     }
                 }
+                unique_names(&enums, &oneofs, &messages)?;
                 break MessageRaw {
                     ident,
                     token,
-                    definitions,
+                    messages,
+                    oneofs,
+                    enums,
                     fields,
                 };
             }
@@ -761,9 +847,10 @@ fn munch_oneof(
 ) -> Result<OneOfRaw, ParseError> {
     let ident = munch_ident(&mut *iter)?;
     let token = token_gen.next();
-    // let oneof_token = types.add_ident(ident);
     expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
-    let mut definitions: Vec<DefinitionRaw> = vec![];
+    let mut messages: Vec<MessageRaw> = vec![];
+    let mut oneofs: Vec<OneOfRaw> = vec![];
+    let mut enums: Vec<Enum> = vec![];
     let mut variants: Vec<OneOfVariantRaw> = vec![];
     let mut field_numbers = HashSet::new();
     loop {
@@ -781,24 +868,27 @@ fn munch_oneof(
                         ));
                     }
                 }
+                unique_names(&enums, &oneofs, &messages)?;
                 return Ok(OneOfRaw {
                     ident,
                     token,
-                    definitions,
+                    oneofs,
+                    messages,
+                    enums,
                     variants,
                 });
             }
             lexer::TokenType::KeywordEnum => {
                 let enm = munch_enum(iter, token_gen)?;
-                definitions.push(DefinitionRaw::Enum(enm));
+                enums.push(enm);
             }
             lexer::TokenType::KeywordOneof => {
                 let oneof = munch_oneof(iter, token_gen)?;
-                definitions.push(DefinitionRaw::OneOf(oneof));
+                oneofs.push(oneof);
             }
             lexer::TokenType::KeywordMessage => {
                 let msg = munch_message(iter, token_gen)?;
-                definitions.push(DefinitionRaw::Message(msg));
+                messages.push(msg);
             }
             lexer::TokenType::Ident(field_name) => {
                 expect_next_equals(iter, lexer::TokenType::AtSign)?;
@@ -817,9 +907,9 @@ fn munch_oneof(
                 expect_next_equals(iter, lexer::TokenType::Colon)?;
                 let type_ = munch_type(iter)?;
                 let indirection = if type_
-                    .modifiers
+                    .containers
                     .iter()
-                    .any(|m| matches!(m, ListSize::Unsized))
+                    .any(|m| matches!(m, Container::UnsizedList))
                 {
                     Indirection::Indirect
                 } else {
@@ -892,12 +982,12 @@ impl From<lexer::ParseError> for ParseError {
 pub(crate) enum ParseErrorType {
     DuplicateEnumVariantValue(Ident, u16),
     DuplicateFieldName(Ident),
+    ExpectedSemicolonOrRightAngleBracket,
     DuplicateFieldNumber(u16),
+    FieldNumberTooLarge(u16),
     DuplicateIdentifier(Ident),
     ExpectedColonOrQuestionMark,
     InvalidSyntax(lexer::ParseErrorType),
-    ExpectedRBracketOrNumber,
-    ExpectedLBracketTypeOrIdent,
     ExpectedEnumMessageOneOfOrIdent,
     TopLevelIdentNotAtBeginningOfFile(Ident),
     UnknownTopLevelIdent(Ident),
@@ -957,10 +1047,6 @@ impl std::fmt::Display for ParseError {
                     write!(f, "failed to parse value literal")?
                 }
             },
-            ParseErrorType::ExpectedRBracketOrNumber => write!(f, "expected `]` or number")?,
-            ParseErrorType::ExpectedLBracketTypeOrIdent => {
-                write!(f, "expected `[`, type, or identifier")?
-            }
             ParseErrorType::ExpectedEnumMessageOneOfOrIdent => write!(
                 f,
                 "expected keyword `enum`, keyword `message`, keyword `oneof`, or identifier"
@@ -1015,6 +1101,14 @@ impl std::fmt::Display for ParseError {
             ParseErrorType::UnknownIdent(ref i) => {
                 write!(f, "could not find definition for ident `{}`", i.value)?;
             }
+            ParseErrorType::FieldNumberTooLarge(n) => write!(
+                f,
+                "field with number {} exceeds maximum of {}",
+                n, MAX_FIELD_NUMBER
+            )?,
+            ParseErrorType::ExpectedSemicolonOrRightAngleBracket => {
+                write!(f, "expected `;` or `>`")?
+            }
         }
         Ok(())
     }
@@ -1024,7 +1118,9 @@ impl std::fmt::Display for ParseError {
 pub(crate) struct Document {
     base_url: Option<CompactString>,
     pub(crate) services: Vec<ServiceRaw>,
-    pub(crate) definitions: Vec<DefinitionRaw>,
+    pub(crate) messages: Vec<MessageRaw>,
+    pub(crate) oneofs: Vec<OneOfRaw>,
+    pub(crate) enums: Vec<Enum>,
 }
 
 // a service with raw idents for inputs and outputs
@@ -1119,63 +1215,6 @@ fn new_ident(line: usize, col: usize, value: CompactString) -> Ident {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DefinitionRaw {
-    Enum(Enum),
-    OneOf(OneOfRaw),
-    Message(MessageRaw),
-}
-
-impl DefinitionRaw {
-    fn validate_fields_and_insert_links(
-        &mut self,
-        scopes: &mut Scopes,
-        links: &mut Links,
-    ) -> Result<(), ParseError> {
-        match *self {
-            DefinitionRaw::Enum(_) => {}
-            DefinitionRaw::OneOf(ref mut inner) => {
-                inner.validate_fields_and_insert_links(scopes, links)?
-            }
-            DefinitionRaw::Message(ref mut inner) => {
-                inner.validate_fields_and_insert_links(scopes, links)?
-            }
-        };
-        Ok(())
-    }
-    fn definition_type(&self) -> DefinitionType {
-        match *self {
-            DefinitionRaw::Enum(_) => DefinitionType::Enum,
-            DefinitionRaw::OneOf(_) => DefinitionType::OneOf,
-            DefinitionRaw::Message(_) => DefinitionType::Message,
-        }
-    }
-
-    fn token(&self) -> Token {
-        match self {
-            DefinitionRaw::Enum(inner) => inner.token,
-            DefinitionRaw::OneOf(inner) => inner.token,
-            DefinitionRaw::Message(inner) => inner.token,
-        }
-    }
-
-    fn name(&self) -> CompactString {
-        match self {
-            DefinitionRaw::Enum(inner) => inner.ident.value.clone(),
-            DefinitionRaw::OneOf(inner) => inner.ident.value.clone(),
-            DefinitionRaw::Message(inner) => inner.ident.value.clone(),
-        }
-    }
-
-    fn name_as_str(&self) -> &str {
-        match self {
-            DefinitionRaw::Enum(inner) => inner.ident.value.as_str(),
-            DefinitionRaw::OneOf(inner) => inner.ident.value.as_str(),
-            DefinitionRaw::Message(inner) => inner.ident.value.as_str(),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Enum {
     pub(crate) ident: Ident,
     pub(crate) token: Token,
@@ -1193,7 +1232,9 @@ pub(crate) struct EnumVariant {
 pub(crate) struct OneOfRaw {
     pub(crate) ident: Ident,
     pub(crate) token: Token,
-    pub(crate) definitions: Vec<DefinitionRaw>,
+    pub(crate) messages: Vec<MessageRaw>,
+    pub(crate) oneofs: Vec<OneOfRaw>,
+    pub(crate) enums: Vec<Enum>,
     pub(crate) variants: Vec<OneOfVariantRaw>,
 }
 
@@ -1206,12 +1247,24 @@ impl OneOfRaw {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
         let layer = scopes.deepest_mut();
-        for def in self.definitions.iter() {
-            layer.insert(def.name(), def.token());
+        // insert declarations into scope
+        for msg in self.messages.iter() {
+            layer.insert(msg.ident.value.clone(), msg.token);
         }
-        for def in self.definitions.iter_mut() {
-            def.validate_fields_and_insert_links(scopes, links)?;
+        for oneof in self.oneofs.iter() {
+            layer.insert(oneof.ident.value.clone(), oneof.token);
         }
+        for enm in self.enums.iter() {
+            layer.insert(enm.ident.value.clone(), enm.token);
+        }
+        // validate nested definitions
+        for msg in self.messages.iter_mut() {
+            msg.validate_fields_and_insert_links(scopes, links)?;
+        }
+        for oneof in self.oneofs.iter_mut() {
+            oneof.validate_fields_and_insert_links(scopes, links)?;
+        }
+        // validate variants
         for var in self.variants.iter_mut() {
             insert_link(
                 self.token,
@@ -1241,7 +1294,7 @@ pub(crate) enum BaseOrUser {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TypeRaw {
-    modifiers: smallvec::SmallVec<[ListSize; 4]>,
+    containers: smallvec::SmallVec<[Container; 4]>,
     base: BaseOrUser,
 }
 
@@ -1249,7 +1302,9 @@ pub(crate) struct TypeRaw {
 pub(crate) struct MessageRaw {
     pub(crate) ident: Ident,
     pub(crate) token: Token,
-    pub(crate) definitions: Vec<DefinitionRaw>,
+    pub(crate) messages: Vec<MessageRaw>,
+    pub(crate) oneofs: Vec<OneOfRaw>,
+    pub(crate) enums: Vec<Enum>,
     pub(crate) fields: Vec<MessageFieldRaw>,
 }
 
@@ -1262,12 +1317,24 @@ impl MessageRaw {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
         let layer = scopes.deepest_mut();
-        for def in self.definitions.iter() {
-            layer.insert(def.name(), def.token());
+        // insert declarations into scope
+        for msg in self.messages.iter() {
+            layer.insert(msg.ident.value.clone(), msg.token);
         }
-        for def in self.definitions.iter_mut() {
-            def.validate_fields_and_insert_links(scopes, links)?;
+        for oneof in self.oneofs.iter() {
+            layer.insert(oneof.ident.value.clone(), oneof.token);
         }
+        for enm in self.enums.iter() {
+            layer.insert(enm.ident.value.clone(), enm.token);
+        }
+        // validate nested definitions
+        for msg in self.messages.iter_mut() {
+            msg.validate_fields_and_insert_links(scopes, links)?;
+        }
+        for oneof in self.oneofs.iter_mut() {
+            oneof.validate_fields_and_insert_links(scopes, links)?;
+        }
+        // validate fields
         for fld in self.fields.iter_mut() {
             insert_link(
                 self.token,
@@ -1294,7 +1361,9 @@ pub(crate) struct MessageFieldRaw {
 // a user-defined type inside `base_type`, if it is one;
 // error if the type's ident is not known
 fn insert_link(
+    // the token for the container type
     start_token: Token,
+    // the type of one of the fields in the container
     base_type: &mut BaseOrUser,
     indirection: Indirection,
     scopes: &mut Scopes,
@@ -1302,14 +1371,14 @@ fn insert_link(
 ) -> Result<(), ParseError> {
     match base_type {
         BaseOrUser::Base(_) => {}
-        BaseOrUser::User(ref i, ref mut user_token) => {
+        BaseOrUser::User(ref i, ref mut field_type_token) => {
             let tok = scopes.lookup_ident(i).ok_or(parse_error(
                 i.line,
                 i.col,
                 ParseErrorType::UnknownIdent(i.clone()),
             ))?;
             // overwrite UNRESOLVED and finalize type association
-            *user_token = tok;
+            *field_type_token = tok;
             // insert associations between this message and type referenced by this field
             links.insert((start_token.0, tok.0), indirection);
         }
@@ -1317,6 +1386,7 @@ fn insert_link(
     Ok(())
 }
 
+// a globally-unique identifier for a user-defined type
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Debug, Hash)]
 pub(crate) struct Token(usize);
 

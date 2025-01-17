@@ -16,7 +16,7 @@ message PokemonInput {
 
 message NewPokemonInput {
 	name @0: string,
-	abilities @1 : []Ability,
+	abilities @1 : List<Ability>,
 	hp @2: u16,
 	atk @3: u8,
 	cost @4?: u8,
@@ -27,7 +27,7 @@ message NewPokemonInput {
 
 message Pokemon {
 	name @0: string,
-	abilities @1? : []Ability,
+	abilities @1? : List<Ability>,
 	hp @2: u16,
 	atk @3: u8,
 	cost @4: u8,
@@ -46,4 +46,10 @@ enum Element {
 message Ability {
 	cost @0: u8,
 	name @1: string,
+}
+
+message X {
+	unsized@0: List<u32>,
+	sized@1: List<u32; 4>,
+	nested@3: List<List<u32>; 3>,
 }

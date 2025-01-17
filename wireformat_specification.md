@@ -7,14 +7,12 @@ Like protobuf, redfield messages are encoded as Tag-Length(?)-Value. A 16-bit in
 
 |Tag|Wire Type|
 |---|---------|
-|0|bool|
-|1|u8 or i8|
-|2|u16 or i16 or enum|
-|3|u32 or i32 or f32|
-|4|u64 or i64 or f64|
-|5|string, byte array, message, or list|
-|6|oneof|
-|7|null|
+|0|bool or u8 or i8||
+|1|u16 or i16 or enum|
+|2|u32 or i32 or f32|
+|3|u64 or i64 or f64|
+|4|string, byte array, message, oneof, or list|
+|5|null|
 
 Therefore, the maximum number of fields in a single message definition is `u16::MAX >> 3 = 8191`.
 
@@ -62,7 +60,7 @@ Enums are represented on the wire as a `u16`.
 Enums are represented as a JSON number.
 
 ### Byte Arrays
-Byte arrays can be thought of as a special interpretation of `[]u8`. They can be considered as raw, possibly opaque data blobs.
+Byte arrays can be thought of as a special interpretation of `List<u8>`. They can be considered as raw, possibly opaque data blobs.
 ```
 message Avatar {
   username: string,
@@ -108,15 +106,15 @@ OneOfs are encoded just like messages.
 OneOfs are encoded just like messages.
 
 ### Lists
-A list is a series of zero or more items. A list's definition may include a size ie `[3]u8`, which indicates that a specific number of items will be present. If a size is specified, it is an error during decoding for the list to have fewer or more values.
+A list is a series of zero or more items. A list's definition may include a size ie `List<u8; 3>`, which indicates that a specific number of items will be present. If a size is specified, it is an error during decoding for the list to have fewer or more values.
 ```
 message Pixel {
-  position_xyz @0: [3]f64,
-  color_rgb @1: [3]u8,
+  position_xyz @0: List<f64; 3>,
+  color_rgb @1: List<u8; 3>,
 }
 ```
 #### Redfield
-Lists are length-prefixed with their length in bytes, NOT the number of items present. A `[]u32` with 10 items will be prefixed with length 40: 10 (number of items) * 4 (byte width of each item). The encoded form is not affected by the presence of a size in the definition.
+Lists are length-prefixed with their length in bytes, NOT the number of items present. A `List<u32>` with 10 items will be prefixed with length 40: 10 (number of items) * 4 (byte width of each item). The encoded form is not affected by the presence of a size in the definition.
 #### JSON
 Lists are encoded as JSON arrays.
 
@@ -131,7 +129,7 @@ Lists are encoded as JSON arrays.
 An optional message field may be omitted from the encoded form.
 ```
 message PaginatedResult {
-  data@0: []DataItem,
+  data@0: List<DataItem>,
   next_token@1?: string, // final page reached when next_token is not present
 }
 ```
