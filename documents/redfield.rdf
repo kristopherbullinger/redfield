@@ -1,5 +1,6 @@
-message RedfieldDocument {
-	base_url@0?: string,
+// this document describes the structure of a redfield document
+
+message Document {
 	messages@1: List<Message>,
 	oneofs@2: List<OneOf>,
 	enums@3: List<Enum>,
@@ -82,6 +83,7 @@ enum BaseType {
 message Service {
 	name@0: string,
 	procedures@1: List<Procedure>,
+	base_url@2?: string,
 }
 
 enum Verb {

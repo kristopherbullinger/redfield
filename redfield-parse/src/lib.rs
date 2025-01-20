@@ -22,8 +22,6 @@ impl Ident {
 /// Represents a parsed and validated Redfield document.
 #[derive(Debug)]
 pub struct Document {
-    /// The url at which the document's services are hosted.
-    pub base_url: Option<String>,
     /// The services and their procedures defined in the document.
     pub services: Vec<Service>,
     /// A list of top-level user-authored messages in the document.
@@ -41,6 +39,8 @@ pub struct Service {
     pub name: Ident,
     /// The procedures (or "endpoints") available in this service.
     pub procedures: Vec<Procedure>,
+    /// The endpoint where the service is hosted, if specified.
+    pub base_url: Option<String>,
 }
 
 /// A procedure is a single operation or "endpoint" exposed by a service.
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn parse_test_document_succeeds() {
-        static DOC: &str = include_str!("../../sample_documents/pokemon.rdf");
+        static DOC: &str = include_str!("../../documents/redfield.rdf");
         let res = from_str(DOC).unwrap();
         println!("{:#?}", res);
     }

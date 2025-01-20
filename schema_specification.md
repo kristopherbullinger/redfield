@@ -9,7 +9,7 @@ This file documents the structure of a redfield schema file using EBNF syntax.
 |`{ X }`         |repetition: X zero or more times|
 
 ```
-redfield_schema = [ "base_url" "=" HTTP_URL ";" ] { top_level_definition }
+document = { top_level_definition }
 top_level_definition = message | service | enum | oneof
 base_type = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "bool" | "string" | "bytes" | "null"
 
@@ -42,7 +42,7 @@ oneof = "oneof" ident oneof_body
 oneof_body = "{" { enum | oneof | message | oneof_field } "}"
 oneof_field = ident "@" field_number ":" type ","
 
-service = "service" ident "{" { procedure } "}"
+service = "service" ident "{" [ "base_url" "=" HTTP_URL ";" ] { procedure } "}"
 procedure = verb ident "(" [ ident ] ")" [ "->" ident ] ";"
 verb = "GET" | "POST"
 ```

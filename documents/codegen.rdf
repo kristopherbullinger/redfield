@@ -1,0 +1,14 @@
+import "./redfield.rdf" as rdf;
+message CodeGenerationRequest {
+	input_files@0?: List<string>,
+	documents@1: List<rdf.Document>,
+}
+
+message CodeGenerationResponse {
+	output_files@0: List<OutputFile>,
+}
+
+message OutputFile {
+	filename@0: string,
+	contents@1: string,
+}

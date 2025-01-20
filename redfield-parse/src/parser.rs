@@ -120,6 +120,7 @@ fn to_document(doc: Document) -> crate::Document {
     let mut services: Vec<crate::Service> = vec![];
     for svc in doc.services {
         services.push(crate::Service {
+            base_url: svc.base_url.map(|s| s.to_string()),
             name: crate::Ident(svc.ident.value),
             procedures: svc
                 .procedures
@@ -134,7 +135,7 @@ fn to_document(doc: Document) -> crate::Document {
         })
     }
     crate::Document {
-        base_url: doc.base_url.map(|s| s.into_string()),
+        // base_url: doc.base_url.map(|s| s.into_string()),
         services,
         messages: doc.messages.into_iter().map(to_message).collect(),
         oneofs: doc.oneofs.into_iter().map(to_oneof).collect(),
@@ -144,10 +145,8 @@ fn to_document(doc: Document) -> crate::Document {
 
 pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError> {
     let mut iter = lexer::lex_document_iter(inp);
-    let mut base_url = None;
     let Some(tok) = iter.next() else {
         return Ok(crate::Document {
-            base_url: None,
             services: vec![],
             messages: vec![],
             oneofs: vec![],
@@ -155,44 +154,13 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
         });
     };
 
-    let mut tok = tok?;
-    // parse top-level identifiers
-    loop {
-        match tok.type_ {
-            lexer::TokenType::Ident(ide) => {
-                if ide.as_str() == "base_url" {
-                    base_url = Some(munch_base_url(&mut iter)?);
-                } else {
-                    return Err(parse_error(
-                        tok.line,
-                        tok.span.0,
-                        ParseErrorType::UnknownTopLevelIdent(new_ident(tok.line, tok.span.0, ide)),
-                    ));
-                }
-            }
-            _ => {
-                break;
-            }
-        }
-        tok = match iter.next() {
-            Some(tok) => tok?,
-            None => {
-                return Ok(crate::Document {
-                    base_url: base_url.map(|s| s.into_string()),
-                    services: vec![],
-                    messages: vec![],
-                    oneofs: vec![],
-                    enums: vec![],
-                });
-            }
-        }
-    }
-    // parse the rest of the document
+    // parse top-level definitions
     let mut messages: Vec<MessageRaw> = vec![];
     let mut oneofs: Vec<OneOfRaw> = vec![];
     let mut enums: Vec<Enum> = vec![];
     let mut services: Vec<ServiceRaw> = vec![];
     let mut token_gen = TokenGenerator::default();
+    let mut tok = tok?;
     loop {
         match tok.type_ {
             lexer::TokenType::Ident(ide) => {
@@ -301,7 +269,6 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
         }
     }
     let doc = Document {
-        base_url,
         services,
         messages,
         oneofs,
@@ -397,10 +364,66 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<ServiceRaw, ParseErr
     let ident = munch_ident(&mut *iter)?;
     expect_next_equals(&mut *iter, lexer::TokenType::LCurly)?;
     let mut procedures: Vec<ProcedureRaw> = vec![];
+    let mut base_url: Option<CompactString> = None;
     loop {
         let tok = next_not_eof(iter)?;
-        let verb = match tok.type_ {
-            lexer::TokenType::Verb(v) => v,
+        match tok.type_ {
+            lexer::TokenType::Ident(s) => {
+                if s == "base_url" {
+                    if base_url.is_some() {
+                        return Err(parse_error(
+                            tok.line,
+                            tok.span.0,
+                            ParseErrorType::DuplicateServiceBaseUrl,
+                        ));
+                    }
+                    base_url = Some(munch_base_url(&mut *iter)?);
+                } else {
+                    return Err(parse_error(
+                        tok.line,
+                        tok.span.0,
+                        ParseErrorType::UnexpectedIdent(new_ident(tok.line, tok.span.0, s)),
+                    ));
+                }
+            }
+            lexer::TokenType::Verb(verb) => {
+                let ident = munch_ident(&mut *iter)?;
+                expect_next_equals(&mut *iter, lexer::TokenType::LParen)?;
+                let tok = next_not_eof(iter)?;
+                let input = match tok.type_ {
+                    lexer::TokenType::RParen => None,
+                    lexer::TokenType::Ident(i) => {
+                        expect_next_equals(&mut *iter, lexer::TokenType::RParen)?;
+                        Some(new_ident(tok.line, tok.span.0, i))
+                    }
+                    _ => {
+                        return Err(parse_error(
+                            tok.line,
+                            tok.span.0,
+                            ParseErrorType::ExpectedIdentOrRParen,
+                        ))
+                    }
+                };
+                let tok = next_not_eof(iter)?;
+                let output = match tok.type_ {
+                    lexer::TokenType::Semicolon => None,
+                    lexer::TokenType::Arrow => Some(munch_ident(&mut *iter)?),
+                    _ => {
+                        return Err(parse_error(
+                            tok.line,
+                            tok.span.0,
+                            ParseErrorType::ExpectedArrowOrSemicolon,
+                        ))
+                    }
+                };
+                expect_next_equals(&mut *iter, lexer::TokenType::Semicolon)?;
+                procedures.push(ProcedureRaw {
+                    verb,
+                    ident,
+                    input,
+                    output,
+                });
+            }
             lexer::TokenType::RCurly => {
                 // ensure all procedure names are unique
                 let mut procedure_names: HashSet<&str> = HashSet::new();
@@ -413,7 +436,11 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<ServiceRaw, ParseErr
                         ));
                     }
                 }
-                return Ok(ServiceRaw { ident, procedures });
+                return Ok(ServiceRaw {
+                    base_url,
+                    ident,
+                    procedures,
+                });
             }
             _ => {
                 return Err(parse_error(
@@ -423,42 +450,6 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<ServiceRaw, ParseErr
                 ))
             }
         };
-        let ident = munch_ident(&mut *iter)?;
-        expect_next_equals(&mut *iter, lexer::TokenType::LParen)?;
-        let tok = next_not_eof(iter)?;
-        let input = match tok.type_ {
-            lexer::TokenType::RParen => None,
-            lexer::TokenType::Ident(i) => {
-                expect_next_equals(&mut *iter, lexer::TokenType::RParen)?;
-                Some(new_ident(tok.line, tok.span.0, i))
-            }
-            _ => {
-                return Err(parse_error(
-                    tok.line,
-                    tok.span.0,
-                    ParseErrorType::ExpectedIdentOrRParen,
-                ))
-            }
-        };
-        let tok = next_not_eof(iter)?;
-        let output = match tok.type_ {
-            lexer::TokenType::Semicolon => None,
-            lexer::TokenType::Arrow => Some(munch_ident(&mut *iter)?),
-            _ => {
-                return Err(parse_error(
-                    tok.line,
-                    tok.span.0,
-                    ParseErrorType::ExpectedArrowOrSemicolon,
-                ))
-            }
-        };
-        expect_next_equals(&mut *iter, lexer::TokenType::Semicolon)?;
-        procedures.push(ProcedureRaw {
-            verb,
-            ident,
-            input,
-            output,
-        });
     }
 }
 
@@ -987,10 +978,10 @@ pub(crate) enum ParseErrorType {
     FieldNumberTooLarge(u16),
     DuplicateIdentifier(Ident),
     ExpectedColonOrQuestionMark,
+    DuplicateServiceBaseUrl,
     InvalidSyntax(lexer::ParseErrorType),
     ExpectedEnumMessageOneOfOrIdent,
     TopLevelIdentNotAtBeginningOfFile(Ident),
-    UnknownTopLevelIdent(Ident),
     DuplicatedEnumVariantUnknown,
     IntegerParseError,
     EnumVariantUnknownNotLast,
@@ -1008,6 +999,7 @@ pub(crate) enum ParseErrorType {
     // (service name,  procedure name, procedure output type)
     ProcedureOutpuNotMessage(Box<(Ident, Ident, Ident, DefinitionType)>),
     UnknownIdent(Ident),
+    UnexpectedIdent(Ident),
     UnexpectedEof,
 }
 
@@ -1056,11 +1048,6 @@ impl std::fmt::Display for ParseError {
                 "top-level identifiers must appear at the top of the file; identifier `{}`",
                 i.value,
             )?,
-            ParseErrorType::UnknownTopLevelIdent(ref i) => write!(
-                f,
-                "unknown or unsupported top-level identifier: {}",
-                i.value
-            )?,
             ParseErrorType::DuplicatedEnumVariantUnknown => {
                 write!(f, "special `UNKNOWN` enum variant must appear only once")?
             }
@@ -1107,7 +1094,13 @@ impl std::fmt::Display for ParseError {
                 n, MAX_FIELD_NUMBER
             )?,
             ParseErrorType::ExpectedSemicolonOrRightAngleBracket => {
-                write!(f, "expected `;` or `>`")?
+                write!(f, "expected `;` or `>`")?;
+            }
+            ParseErrorType::DuplicateServiceBaseUrl => {
+                write!(f, "duplicate service base url")?;
+            }
+            ParseErrorType::UnexpectedIdent(ref i) => {
+                write!(f, "unexpected ident `{}`", i.value)?;
             }
         }
         Ok(())
@@ -1116,7 +1109,6 @@ impl std::fmt::Display for ParseError {
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub(crate) struct Document {
-    base_url: Option<CompactString>,
     pub(crate) services: Vec<ServiceRaw>,
     pub(crate) messages: Vec<MessageRaw>,
     pub(crate) oneofs: Vec<OneOfRaw>,
@@ -1126,6 +1118,7 @@ pub(crate) struct Document {
 // a service with raw idents for inputs and outputs
 #[derive(Debug, PartialEq, Eq, Default)]
 pub(crate) struct ServiceRaw {
+    pub(crate) base_url: Option<CompactString>,
     pub(crate) ident: Ident,
     pub(crate) procedures: Vec<ProcedureRaw>,
 }
