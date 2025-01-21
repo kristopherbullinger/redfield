@@ -1,4 +1,4 @@
-import "./redfield.rdf" as rdf;
+import redfield as rdf;
 message CodeGenerationRequest {
 	input_files@0?: List<string>,
 	documents@1: List<rdf.Document>,

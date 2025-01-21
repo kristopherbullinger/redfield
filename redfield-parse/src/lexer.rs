@@ -8,6 +8,7 @@ pub struct Token {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum TokenType {
+    Dot,
     LParen,
     RParen,
     LCurly,
@@ -19,7 +20,7 @@ pub enum TokenType {
     Colon,
     Semicolon,
     Equals,
-    KeywordUse,
+    KeywordImport,
     KeywordAs,
     // Comment(Comment),
     // Whitespace(Whitespace),
@@ -41,6 +42,7 @@ pub enum TokenType {
 impl TokenType {
     pub(crate) fn debug_str(&self) -> &'static str {
         match *self {
+            TokenType::Dot => "`.`",
             TokenType::LParen => "`(`",
             TokenType::RParen => "`)`",
             TokenType::LAngleBracket => "`<`",
@@ -61,7 +63,7 @@ impl TokenType {
             TokenType::KeywordOneof => "keyword `oneof`",
             TokenType::KeywordService => "keyword `service`",
             TokenType::KeywordList => "keyword `List`",
-            TokenType::KeywordUse => "keyword `use`",
+            TokenType::KeywordImport => "keyword `import`",
             TokenType::KeywordAs => "keyword `as`",
             TokenType::AtSign => "`@`",
             TokenType::Verb(ref vb) => match vb {
@@ -105,7 +107,7 @@ static KEYWORDS_TOKENS: &[(&str, TokenType)] = &[
     ("oneof", TokenType::KeywordOneof),
     ("message", TokenType::KeywordMessage),
     ("true", TokenType::True),
-    ("use", TokenType::KeywordUse),
+    ("import", TokenType::KeywordImport),
     ("as", TokenType::KeywordAs),
     ("false", TokenType::False),
     ("List", TokenType::KeywordList),
@@ -336,6 +338,12 @@ impl<'s> TokenIter<'s> {
                 [] => break,
                 [b, ..] => {
                     match b {
+                        b'.' => {
+                            let tok = token(self.line, (self.col, self.col + 1), TokenType::Dot);
+                            self.col += 1;
+                            self.inp = &self.inp[1..];
+                            return Some(Ok(tok));
+                        }
                         b'\n' => {
                             self.line += 1;
                             self.col = 0;

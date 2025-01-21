@@ -22,6 +22,7 @@ impl Ident {
 /// Represents a parsed and validated Redfield document.
 #[derive(Debug)]
 pub struct Document {
+    pub imports: Vec<Import>,
     /// The services and their procedures defined in the document.
     pub services: Vec<Service>,
     /// A list of top-level user-authored messages in the document.
@@ -30,6 +31,12 @@ pub struct Document {
     pub oneofs: Vec<OneOf>,
     /// A list of top-level user-authored messages in the document.
     pub enums: Vec<Enum>,
+}
+
+#[derive(Debug)]
+pub struct Import {
+    pub name: CompactString,
+    pub alias: Option<CompactString>,
 }
 
 /// A service is a group of procedures hosted at a single URL.
@@ -192,7 +199,7 @@ mod tests {
 
     #[test]
     fn parse_test_document_succeeds() {
-        static DOC: &str = include_str!("../../documents/redfield.rdf");
+        static DOC: &str = include_str!("../../documents/codegen.rdf");
         let res = from_str(DOC).unwrap();
         println!("{:#?}", res);
     }

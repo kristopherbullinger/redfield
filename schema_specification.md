@@ -9,7 +9,8 @@ This file documents the structure of a redfield schema file using EBNF syntax.
 |`{ X }`         |repetition: X zero or more times|
 
 ```
-document = { top_level_definition }
+document = { import_statement } { top_level_definition }
+import_statement = "import" ident [ "as" ident ] ";"
 top_level_definition = message | service | enum | oneof
 base_type = "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "bool" | "string" | "bytes" | "null"
 
@@ -26,7 +27,8 @@ binary_digit = "0" | "1"
 binary_number = "0b" binary_digit { binary_digit }
 
 ident = ascii_character { ascii_character | ascii_digit | "_" } 
-type = ( list type ) | ( base_type | ident )
+fullIdent = [ ident "." ] ident
+type = ( list type ) | ( base_type | fullIdent )
 list = "[" [ decimal_number ] "]"
 
 message = "message" ident message_body
