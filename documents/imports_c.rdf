@@ -1,0 +1,5 @@
+import imports_root as root;
+
+message C {
+	root@0: root.Root,
+}

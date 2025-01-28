@@ -3,6 +3,12 @@
 version = 3
 
 [[package]]
+name = "camino"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b96ec4966b5813e2c0507c1f86115c8c5abaadc3980879c3424042a02fd1ad3"
+
+[[package]]
 name = "castaway"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -38,9 +44,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d75a2a4b1b190afb6f5425f10f6a8f959d2ea0b9c2b1d79553551850539e4674"
 
 [[package]]
+name = "redfield"
+version = "0.1.0"
+
+[[package]]
 name = "redfield-parse"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "compact_str",
  "smallvec",
 ]

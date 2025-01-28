@@ -1,0 +1,5 @@
+import imports_c as c;
+
+message B {
+	c@0: c.C,
+}

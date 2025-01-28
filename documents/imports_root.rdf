@@ -1,0 +1,5 @@
+import imports_a as a;
+
+message Root {
+	a@0?: a.A,
+}

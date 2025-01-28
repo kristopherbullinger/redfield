@@ -1,0 +1,5 @@
+import imports_b as b;
+
+message A {
+	b@0: b.B,
+}

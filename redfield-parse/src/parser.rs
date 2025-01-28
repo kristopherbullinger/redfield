@@ -18,7 +18,10 @@ fn to_type(type_: TypeRaw) -> crate::Type {
         containers: crate::Containers(type_.containers),
         base: match type_.base {
             BaseOrUser::Base(t) => crate::BaseOrUser::Base(t),
-            BaseOrUser::User(_, name, _) => crate::BaseOrUser::User(crate::Ident(name.value)),
+            BaseOrUser::User(typeref) => crate::BaseOrUser::User(crate::FullIdent {
+                namespace: typeref.namespace.map(|n| crate::Ident(n.value)),
+                name: crate::Ident(typeref.name.value),
+            }),
         },
     }
 }
@@ -116,6 +119,13 @@ fn unique_names<'a>(
     Ok(())
 }
 
+fn to_typeref(tr: TypeRef) -> crate::TypeRef {
+    crate::TypeRef {
+        module: tr.namespace.map(|n| crate::Ident(n.value)),
+        name: crate::Ident(tr.name.value),
+    }
+}
+
 fn to_document(doc: Document) -> crate::Document {
     let mut services: Vec<crate::Service> = vec![];
     for svc in doc.services {
@@ -128,19 +138,215 @@ fn to_document(doc: Document) -> crate::Document {
                 .map(|prc| crate::Procedure {
                     verb: prc.verb,
                     name: crate::Ident(prc.ident.value),
-                    input: prc.input.map(|n| crate::Ident(n.value)),
-                    output: prc.output.map(|n| crate::Ident(n.value)),
+                    input: prc.input.map(to_typeref),
+                    output: prc.output.map(to_typeref),
                 })
                 .collect(),
         })
     }
+    let imports = doc
+        .imports
+        .into_iter()
+        .map(|imp| crate::Import {
+            name: imp.name.value,
+            alias: imp.alias.map(|a| a.value),
+        })
+        .collect();
     crate::Document {
-        imports: vec![],
+        imports,
         services,
         messages: doc.messages.into_iter().map(to_message).collect(),
         oneofs: doc.oneofs.into_iter().map(to_oneof).collect(),
         enums: doc.enums.into_iter().map(to_enum).collect(),
     }
+}
+
+pub(crate) fn parse_raw_document_from_str(
+    inp: &str,
+    token_gen: &mut TokenGenerator,
+) -> Result<Document, ParseError> {
+    let mut iter = lexer::lex_document_iter(inp);
+    let Some(tok) = iter.next() else {
+        return Ok(Document {
+            imports: vec![],
+            services: vec![],
+            messages: vec![],
+            oneofs: vec![],
+            enums: vec![],
+        });
+    };
+    let mut tok = tok?;
+    // parse import statements
+    let mut imports: Vec<Import> = vec![];
+    while let lexer::TokenType::KeywordImport = tok.type_ {
+        let name = munch_ident(&mut iter)?;
+        tok = next_not_eof(&mut iter)?;
+        match tok.type_ {
+            lexer::TokenType::Semicolon => {
+                imports.push(Import { name, alias: None });
+            }
+            lexer::TokenType::KeywordAs => {
+                let alias = Some(munch_ident(&mut iter)?);
+                expect_next_equals(&mut iter, lexer::TokenType::Semicolon)?;
+                imports.push(Import { name, alias });
+            }
+            _ => {
+                return Err(parse_error(
+                    tok.line,
+                    tok.span.0,
+                    ParseErrorType::ExpectedKeywordAsOrSemicolon,
+                ));
+            }
+        }
+        tok = match iter.next() {
+            Some(tok) => tok?,
+            None => {
+                break;
+            }
+        }
+    }
+
+    // parse top-level definitions
+    let mut messages: Vec<MessageRaw> = vec![];
+    let mut oneofs: Vec<OneOfRaw> = vec![];
+    let mut enums: Vec<Enum> = vec![];
+    let mut services: Vec<ServiceRaw> = vec![];
+    loop {
+        match tok.type_ {
+            lexer::TokenType::Ident(ide) => {
+                return Err(parse_error(
+                    tok.line,
+                    tok.span.0,
+                    ParseErrorType::TopLevelIdentNotAtBeginningOfFile(new_ident(
+                        tok.line, tok.span.0, ide,
+                    )),
+                ));
+            }
+            lexer::TokenType::KeywordService => {
+                let svc = munch_service(&mut iter)?;
+                services.push(svc);
+            }
+            lexer::TokenType::KeywordMessage => {
+                let msg = munch_message(&mut iter, token_gen)?;
+                messages.push(msg);
+            }
+            lexer::TokenType::KeywordEnum => {
+                let enm = munch_enum(&mut iter, token_gen)?;
+                enums.push(enm);
+            }
+            lexer::TokenType::KeywordOneof => {
+                let oneof = munch_oneof(&mut iter, token_gen)?;
+                oneofs.push(oneof);
+            }
+            _ => {
+                return Err(parse_error(
+                    tok.line,
+                    tok.span.0,
+                    ParseErrorType::ExpectedServiceMessageEnumOrOneof,
+                ));
+            }
+        }
+        tok = match iter.next() {
+            Some(tok) => tok?,
+            None => {
+                break;
+            }
+        }
+    }
+    unique_names(&enums, &oneofs, &messages)?;
+    Ok(Document {
+        imports,
+        services,
+        messages,
+        oneofs,
+        enums,
+    })
+}
+
+pub(crate) fn resolve_types(
+    doc: Document,
+    imports: Imports,
+    links: &mut Links,
+) -> Result<crate::Document, ParseError> {
+    let Document {
+        imports: doc_imports,
+        services,
+        mut messages,
+        mut oneofs,
+        enums,
+    } = doc;
+    // ensure service names don't collide with data definition names and validate svc inp/outputs
+    {
+        let mut toplevel_names: HashMap<&str, DefinitionType> = Default::default();
+        for msg in messages.iter() {
+            toplevel_names.insert(msg.ident.value.as_str(), DefinitionType::Message);
+        }
+        for oneof in oneofs.iter() {
+            toplevel_names.insert(oneof.ident.value.as_str(), DefinitionType::OneOf);
+        }
+        for enm in enums.iter() {
+            toplevel_names.insert(enm.ident.value.as_str(), DefinitionType::Enum);
+        }
+        validate_svcs_(&services, &toplevel_names, &imports)?
+    };
+    // validate idents and add type associations
+    let mut scopes = {
+        // initialize the global scope with top-level idents
+        let mut scopes = Scopes::default();
+        for msg in messages.iter() {
+            scopes.global.insert(msg.ident.value.clone(), msg.token);
+        }
+        for oneof in oneofs.iter() {
+            scopes.global.insert(oneof.ident.value.clone(), oneof.token);
+        }
+        for enm in enums.iter() {
+            scopes.global.insert(enm.ident.value.clone(), enm.token);
+        }
+        scopes
+    };
+    // do field types point to valid user-defined types? if they do,
+    // record associations between the definition and pointed-to types
+    for msg in messages.iter_mut() {
+        msg.validate_fields_and_insert_links(&mut scopes, links, &imports)?;
+    }
+    for oneof in oneofs.iter_mut() {
+        oneof.validate_fields_and_insert_links(&mut scopes, links, &imports)?;
+    }
+    // detect recursion of user-defined types and insert indirection
+    {
+        for msg in messages.iter_mut() {
+            let target = msg.token;
+            for field in msg.fields.iter_mut() {
+                if let (Indirection::Direct, BaseOrUser::User(typeref)) =
+                    (field.indirection, &field.type_.base)
+                {
+                    let tok = typeref.token;
+                    let start = tok;
+                    insert_indirection(start, target, &mut field.indirection, links);
+                }
+            }
+        }
+        for oneof in oneofs.iter_mut() {
+            let target = oneof.token;
+            for var in oneof.variants.iter_mut() {
+                if let (Indirection::Direct, BaseOrUser::User(typeref)) =
+                    (var.indirection, &var.type_.base)
+                {
+                    let tok = typeref.token;
+                    let start = tok;
+                    insert_indirection(start, target, &mut var.indirection, links);
+                }
+            }
+        }
+    }
+    let doc = Document {
+        imports: doc_imports,
+        services,
+        messages,
+        oneofs,
+        enums,
+    };
+    Ok(to_document(doc))
 }
 
 pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError> {
@@ -246,7 +452,7 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
         for enm in enums.iter() {
             toplevel_names.insert(enm.ident.value.as_str(), DefinitionType::Enum);
         }
-        validate_svcs(&services, &toplevel_names)?
+        // validate_svcs(&services, &toplevel_names)?
     };
 
     // validate idents and add type associations
@@ -268,20 +474,21 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
     // record associations between the definition and pointed-to types
     let mut links = Links::default();
     for msg in messages.iter_mut() {
-        msg.validate_fields_and_insert_links(&mut scopes, &mut links)?;
+        msg.validate_fields_and_insert_links(&mut scopes, &mut links, &Default::default())?;
     }
     for oneof in oneofs.iter_mut() {
-        oneof.validate_fields_and_insert_links(&mut scopes, &mut links)?;
+        oneof.validate_fields_and_insert_links(&mut scopes, &mut links, &Default::default())?;
     }
     // detect recursion of user-defined types and insert indirection
     {
         for msg in messages.iter_mut() {
             let target = msg.token;
             for field in msg.fields.iter_mut() {
-                if let (Indirection::Direct, BaseOrUser::User(_, _, tok)) =
+                if let (Indirection::Direct, BaseOrUser::User(typeref)) =
                     (field.indirection, &field.type_.base)
                 {
-                    let start = *tok;
+                    let tok = typeref.token;
+                    let start = tok;
                     insert_indirection(start, target, &mut field.indirection, &mut links);
                 }
             }
@@ -289,10 +496,11 @@ pub(crate) fn document_from_str(inp: &str) -> Result<crate::Document, ParseError
         for oneof in oneofs.iter_mut() {
             let target = oneof.token;
             for var in oneof.variants.iter_mut() {
-                if let (Indirection::Direct, BaseOrUser::User(_, _, tok)) =
+                if let (Indirection::Direct, BaseOrUser::User(typeref)) =
                     (var.indirection, &var.type_.base)
                 {
-                    let start = *tok;
+                    let tok = typeref.token;
+                    let start = tok;
                     insert_indirection(start, target, &mut var.indirection, &mut links);
                 }
             }
@@ -338,6 +546,7 @@ fn insert_indirection(
 fn validate_svcs(
     services: &[ServiceRaw],
     top_level_identifiers: &HashMap<&str, DefinitionType>,
+    imports: &Imports,
 ) -> Result<(), ParseError> {
     for svc in services.iter() {
         if top_level_identifiers.contains_key(svc.ident.as_str()) {
@@ -348,7 +557,29 @@ fn validate_svcs(
             ));
         }
         for prc in svc.procedures.iter() {
-            prc.validate_idents(&svc.ident, top_level_identifiers)?;
+            prc.validate_idents(&svc.ident, top_level_identifiers, imports)?;
+        }
+    }
+    Ok(())
+}
+
+// ensure all procedure inputs and outputs refer to a valid message type
+// and that service names don't collide with names of user types
+fn validate_svcs_(
+    services: &[ServiceRaw],
+    top_level_identifiers: &HashMap<&str, DefinitionType>,
+    imports: &Imports,
+) -> Result<(), ParseError> {
+    for svc in services.iter() {
+        if top_level_identifiers.contains_key(svc.ident.as_str()) {
+            return Err(parse_error(
+                svc.ident.line,
+                svc.ident.col,
+                ParseErrorType::DuplicateIdentifier(svc.ident.clone()),
+            ));
+        }
+        for prc in svc.procedures.iter() {
+            prc.validate_idents(&svc.ident, top_level_identifiers, imports)?;
         }
     }
     Ok(())
@@ -420,25 +651,11 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<ServiceRaw, ParseErr
             lexer::TokenType::Verb(verb) => {
                 let ident = munch_ident(iter)?;
                 expect_next_equals(iter, lexer::TokenType::LParen)?;
-                let tok = next_not_eof(iter)?;
-                let input = match tok.type_ {
-                    lexer::TokenType::RParen => None,
-                    lexer::TokenType::Ident(i) => {
-                        expect_next_equals(iter, lexer::TokenType::RParen)?;
-                        Some(new_ident(tok.line, tok.span.0, i))
-                    }
-                    _ => {
-                        return Err(parse_error(
-                            tok.line,
-                            tok.span.0,
-                            ParseErrorType::ExpectedIdentOrRParen,
-                        ))
-                    }
-                };
+                let input = munch_typeref(iter, lexer::TokenType::RParen)?;
                 let tok = next_not_eof(iter)?;
                 let output = match tok.type_ {
+                    lexer::TokenType::Arrow => munch_typeref(iter, lexer::TokenType::Semicolon)?,
                     lexer::TokenType::Semicolon => None,
-                    lexer::TokenType::Arrow => Some(munch_ident(iter)?),
                     _ => {
                         return Err(parse_error(
                             tok.line,
@@ -447,7 +664,6 @@ fn munch_service(iter: &mut lexer::TokenIter<'_>) -> Result<ServiceRaw, ParseErr
                         ))
                     }
                 };
-                expect_next_equals(iter, lexer::TokenType::Semicolon)?;
                 procedures.push(ProcedureRaw {
                     verb,
                     ident,
@@ -506,9 +722,18 @@ fn munch_field_type(iter: &mut lexer::TokenIter<'_>) -> Result<TypeRaw, ParseErr
                     let namespace = Some(new_ident(tok.line, tok.span.0, i));
                     let name = munch_ident(iter)?;
                     tok = next_not_eof(iter)?;
-                    break BaseOrUser::User(namespace, name, UNRESOLVED);
+                    break BaseOrUser::User(TypeRef {
+                        namespace,
+                        name,
+                        token: UNRESOLVED,
+                    });
                 } else {
-                    break BaseOrUser::User(None, new_ident(tok.line, tok.span.0, i), UNRESOLVED);
+                    let name = new_ident(tok.line, tok.span.0, i);
+                    break BaseOrUser::User(TypeRef {
+                        namespace: None,
+                        name,
+                        token: UNRESOLVED,
+                    });
                 };
             }
             lexer::TokenType::BaseType(t) => {
@@ -595,6 +820,9 @@ fn munch_field_number(iter: &mut lexer::TokenIter<'_>) -> Result<WithPosition<u1
     }
     Ok(f)
 }
+
+// module name -> type name -> type id and msg/oneof/enum
+pub(crate) type Imports = HashMap<CompactString, HashMap<CompactString, DefinitionType>>;
 
 type ScopeLayer = HashMap<CompactString, Token>;
 #[derive(Debug, Default)]
@@ -749,6 +977,48 @@ fn munch_message(
         }
     };
     Ok(msg)
+}
+
+fn munch_typeref(
+    iter: &mut lexer::TokenIter<'_>,
+    terminate_at: lexer::TokenType,
+) -> Result<Option<TypeRef>, ParseError> {
+    let line = iter.line;
+    let col = iter.col;
+    let tok = next_not_eof(iter)?;
+    let ident1 = match tok.type_ {
+        lexer::TokenType::Ident(i) => Ident {
+            value: i,
+            line: tok.line,
+            col: tok.span.0,
+        },
+        _ if tok.type_ == terminate_at => return Ok(None),
+        _ => return Err(parse_error(line, col, ParseErrorType::ExpectedIdent)),
+    };
+    let tok = next_not_eof(iter)?;
+    match tok.type_ {
+        lexer::TokenType::Dot => {
+            let name = munch_ident(iter)?;
+            expect_next_equals(iter, terminate_at)?;
+            Ok(Some(TypeRef {
+                namespace: Some(ident1),
+                name,
+                token: UNRESOLVED,
+            }))
+        }
+        _ if tok.type_ == terminate_at => Ok(Some(TypeRef {
+            namespace: None,
+            name: ident1,
+            token: UNRESOLVED,
+        })),
+        _ => {
+            return Err(parse_error(
+                tok.line,
+                tok.span.0,
+                ParseErrorType::Expected(terminate_at),
+            ))
+        }
+    }
 }
 
 fn munch_ident(iter: &mut lexer::TokenIter<'_>) -> Result<Ident, ParseError> {
@@ -1018,6 +1288,7 @@ impl From<lexer::ParseError> for ParseError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ParseErrorType {
+    UnknownNamespace(Ident),
     ExpectedIdentTypeOrKeywordList,
     ExpectedKeywordAsOrSemicolon,
     DuplicateEnumVariantValue(Ident, u16),
@@ -1157,6 +1428,9 @@ impl std::fmt::Display for ParseError {
             ParseErrorType::ExpectedIdentTypeOrKeywordList => {
                 write!(f, "expected identifier, type, or keyword `List`")?;
             }
+            ParseErrorType::UnknownNamespace(ref i) => {
+                write!(f, "unknown namespace `{}`", i.value)?
+            }
         }
         Ok(())
     }
@@ -1173,8 +1447,8 @@ pub(crate) struct Document {
 
 #[derive(Debug, PartialEq, Eq, Default)]
 pub(crate) struct Import {
-    name: Ident,
-    alias: Option<Ident>,
+    pub(crate) name: Ident,
+    pub(crate) alias: Option<Ident>,
 }
 
 // a service with raw idents for inputs and outputs
@@ -1189,64 +1463,87 @@ pub(crate) struct ServiceRaw {
 pub(crate) struct ProcedureRaw {
     pub(crate) verb: Verb,
     pub(crate) ident: Ident,
-    pub(crate) input: Option<Ident>,
-    pub(crate) output: Option<Ident>,
+    pub(crate) input: Option<TypeRef>,
+    pub(crate) output: Option<TypeRef>,
 }
 
+fn validate_procedure_type(
+    svc: &Ident,
+    prc: &Ident,
+    tr: &TypeRef,
+    top_level_identifiers: &HashMap<&str, DefinitionType>,
+    imports: &Imports,
+) -> Result<(), ParseError> {
+    match tr.namespace {
+        Some(ref ns) => {
+            let idents = imports.get(&ns.value).ok_or_else(|| {
+                parse_error(
+                    ns.line,
+                    ns.col,
+                    ParseErrorType::UnknownNamespace(ns.clone()),
+                )
+            })?;
+            let type_ = idents.get(&tr.name.value).ok_or_else(|| {
+                parse_error(
+                    tr.name.line,
+                    tr.name.col,
+                    ParseErrorType::UnknownIdent(tr.name.clone()),
+                )
+            })?;
+            match type_ {
+                DefinitionType::Message => Ok(()),
+                _ => Err(parse_error(
+                    tr.name.line,
+                    tr.name.col,
+                    ParseErrorType::ProcedureInputNotMessage(Box::new((
+                        svc.clone(),
+                        prc.clone(),
+                        tr.name.clone(),
+                        *type_,
+                    ))),
+                )),
+            }
+        }
+        None => {
+            let type_ = top_level_identifiers
+                .get(tr.name.value.as_str())
+                .ok_or_else(|| {
+                    parse_error(
+                        tr.name.line,
+                        tr.name.col,
+                        ParseErrorType::UnknownIdent(tr.name.clone()),
+                    )
+                })?;
+            match type_ {
+                DefinitionType::Message => Ok(()),
+                _ => Err(parse_error(
+                    tr.name.line,
+                    tr.name.col,
+                    ParseErrorType::ProcedureInputNotMessage(Box::new((
+                        svc.clone(),
+                        prc.clone(),
+                        tr.name.clone(),
+                        *type_,
+                    ))),
+                )),
+            }
+        }
+    };
+    Ok(())
+}
 impl ProcedureRaw {
     fn validate_idents(
         &self,
         svc: &Ident,
         top_level_identifiers: &HashMap<&str, DefinitionType>,
+        imports: &Imports,
     ) -> Result<(), ParseError> {
         let prc = self;
         if let Some(inp) = prc.input.as_ref() {
-            match top_level_identifiers.get(inp.as_str()).copied() {
-                Some(DefinitionType::Message) => {}
-                Some(type_) => {
-                    return Err(parse_error(
-                        inp.line,
-                        inp.col,
-                        ParseErrorType::ProcedureInputNotMessage(Box::new((
-                            svc.clone(),
-                            prc.ident.clone(),
-                            inp.clone(),
-                            type_,
-                        ))),
-                    ))
-                }
-                None => {
-                    return Err(parse_error(
-                        inp.line,
-                        inp.col,
-                        ParseErrorType::UnknownIdent(inp.clone()),
-                    ))
-                }
-            };
+            validate_procedure_type(svc, &prc.ident, inp, top_level_identifiers, imports)?;
         };
         if let Some(inp) = prc.output.as_ref() {
-            match top_level_identifiers.get(inp.as_str()).copied() {
-                Some(DefinitionType::Message) => {}
-                Some(type_) => {
-                    return Err(parse_error(
-                        inp.line,
-                        inp.col,
-                        ParseErrorType::ProcedureOutpuNotMessage(Box::new((
-                            svc.clone(),
-                            prc.ident.clone(),
-                            inp.clone(),
-                            type_,
-                        ))),
-                    ))
-                }
-                None => {
-                    return Err(parse_error(
-                        inp.line,
-                        inp.col,
-                        ParseErrorType::UnknownIdent(inp.clone()),
-                    ))
-                }
-            };
+            validate_procedure_type(svc, &prc.ident, inp, top_level_identifiers, imports)?;
         };
         Ok(())
     }
@@ -1298,6 +1595,7 @@ impl OneOfRaw {
         &mut self,
         scopes: &mut Scopes,
         links: &mut Links,
+        imports: &Imports,
     ) -> Result<(), ParseError> {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
@@ -1314,20 +1612,44 @@ impl OneOfRaw {
         }
         // validate nested definitions
         for msg in self.messages.iter_mut() {
-            msg.validate_fields_and_insert_links(scopes, links)?;
+            msg.validate_fields_and_insert_links(scopes, links, imports)?;
         }
         for oneof in self.oneofs.iter_mut() {
-            oneof.validate_fields_and_insert_links(scopes, links)?;
+            oneof.validate_fields_and_insert_links(scopes, links, imports)?;
         }
         // validate variants
         for var in self.variants.iter_mut() {
-            insert_link(
-                self.token,
-                &mut var.type_.base,
-                var.indirection,
-                scopes,
-                links,
-            )?;
+            // if there is a namespace, make sure there is a valid import and
+            // type definition there. if not, ensure a valid type exists
+            // in this document and store the graph edge
+            match var.type_.base {
+                BaseOrUser::Base(_) => {}
+                BaseOrUser::User(ref mut typeref) => match typeref.namespace {
+                    Some(ref ns) => match imports.get(ns.as_str()) {
+                        Some(doc) => match doc.get(typeref.name.as_str()) {
+                            Some(_) => {}
+                            None => {
+                                let tr = typeref.name.clone();
+                                return Err(parse_error(
+                                    tr.line,
+                                    tr.col,
+                                    ParseErrorType::UnknownIdent(tr),
+                                ));
+                            }
+                        },
+                        None => {
+                            return Err(parse_error(
+                                ns.line,
+                                ns.col,
+                                ParseErrorType::UnknownNamespace(ns.clone()),
+                            ))
+                        }
+                    },
+                    None => {
+                        insert_link(self.token, typeref, var.indirection, scopes, links)?;
+                    }
+                },
+            }
         }
         Ok(())
     }
@@ -1341,11 +1663,19 @@ pub(crate) struct OneOfVariantRaw {
     pub(crate) indirection: Indirection,
 }
 
+// a reference to a user-defined type
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TypeRef {
+    namespace: Option<Ident>,
+    name: Ident,
+    token: Token,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BaseOrUser {
     Base(BaseType),
     // optional namespace, type name, type token
-    User(Option<Ident>, Ident, Token),
+    User(TypeRef),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1369,6 +1699,7 @@ impl MessageRaw {
         &mut self,
         scopes: &mut Scopes,
         links: &mut Links,
+        imports: &Imports,
     ) -> Result<(), ParseError> {
         let _guard = scopes.next();
         let scopes = &mut *_guard.0;
@@ -1385,20 +1716,44 @@ impl MessageRaw {
         }
         // validate nested definitions
         for msg in self.messages.iter_mut() {
-            msg.validate_fields_and_insert_links(scopes, links)?;
+            msg.validate_fields_and_insert_links(scopes, links, imports)?;
         }
         for oneof in self.oneofs.iter_mut() {
-            oneof.validate_fields_and_insert_links(scopes, links)?;
+            oneof.validate_fields_and_insert_links(scopes, links, imports)?;
         }
         // validate fields
         for fld in self.fields.iter_mut() {
-            insert_link(
-                self.token,
-                &mut fld.type_.base,
-                fld.indirection,
-                scopes,
-                links,
-            )?;
+            // if there is a namespace, make sure there is a valid import and
+            // type definition there. if not, ensure a valid type exists
+            // in this document and store the graph edge
+            match fld.type_.base {
+                BaseOrUser::Base(_) => {}
+                BaseOrUser::User(ref mut typeref) => match typeref.namespace {
+                    Some(ref ns) => match imports.get(ns.as_str()) {
+                        Some(doc) => match doc.get(typeref.name.as_str()) {
+                            Some(_) => {}
+                            None => {
+                                let tr = typeref.name.clone();
+                                return Err(parse_error(
+                                    tr.line,
+                                    tr.col,
+                                    ParseErrorType::UnknownIdent(tr),
+                                ));
+                            }
+                        },
+                        None => {
+                            return Err(parse_error(
+                                ns.line,
+                                ns.col,
+                                ParseErrorType::UnknownNamespace(ns.clone()),
+                            ))
+                        }
+                    },
+                    None => {
+                        insert_link(self.token, typeref, fld.indirection, scopes, links)?;
+                    }
+                },
+            }
         }
         Ok(())
     }
@@ -1420,25 +1775,25 @@ fn insert_link(
     // the token for the container type
     start_token: Token,
     // the type of one of the fields in the container
-    base_type: &mut BaseOrUser,
+    typeref: &mut TypeRef,
     indirection: Indirection,
     scopes: &mut Scopes,
     links: &mut Links,
 ) -> Result<(), ParseError> {
-    match base_type {
-        BaseOrUser::Base(_) => {}
-        BaseOrUser::User(_, ref i, ref mut field_type_token) => {
-            let tok = scopes.lookup_ident(i).ok_or(parse_error(
-                i.line,
-                i.col,
-                ParseErrorType::UnknownIdent(i.clone()),
-            ))?;
-            // overwrite UNRESOLVED and finalize type association
-            *field_type_token = tok;
-            // insert associations between this message and type referenced by this field
-            links.insert((start_token.0, tok.0), indirection);
-        }
-    };
+    // external types can never point back to this type because
+    // import cycles are not allowed
+    if typeref.namespace.is_some() {
+        return Ok(());
+    }
+    let tok = scopes.lookup_ident(&typeref.name).ok_or(parse_error(
+        typeref.name.line,
+        typeref.name.col,
+        ParseErrorType::UnknownIdent(typeref.name.clone()),
+    ))?;
+    // overwrite UNRESOLVED and finalize type association
+    typeref.token = tok;
+    // insert associations between this message and type referenced by this field
+    links.insert((start_token.0, tok.0), indirection);
     Ok(())
 }
 
@@ -1450,12 +1805,16 @@ pub(crate) struct Token(usize);
 // and overwritten if type check succeeds
 const UNRESOLVED: Token = Token(usize::MAX);
 
-type Links = BTreeMap<(usize, usize), Indirection>;
+pub(crate) type Links = BTreeMap<(usize, usize), Indirection>;
 
 // append-only sink for idents of user-defined types
 #[derive(Debug, Default)]
-struct TokenGenerator(usize);
+pub(crate) struct TokenGenerator(usize);
 impl TokenGenerator {
+    pub(crate) fn new() -> TokenGenerator {
+        TokenGenerator(0)
+    }
+
     fn next(&mut self) -> Token {
         let n = self.0;
         self.0 += 1;
