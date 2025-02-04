@@ -1,109 +1,62 @@
-use std::collections::HashMap;
+use std::io::{Error as IoError, Read, Write};
+
 type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub struct Error(ErrorKind);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(strum_macros::FromRepr, Debug, Clone, Copy)]
+#[repr(u8)]
 pub enum WireType {
-    OneByte,
-    TwoByte,
-    FourByte,
-    EightByte,
-    LengthPrefix,
-    Null,
+    /// Types that are one byte long: `u8`, `i8`, and `bool`.
+    OneByte = 0,
+    /// Types that are two bytes long: `u16` and `i16`.
+    TwoByte = 1,
+    /// Types that are four bytes long: `u32`, `i32` and `f32`.
+    FourByte = 2,
+    /// Types that are eight bytes long: `u64`, `i64`, and `f64`.
+    EightByte = 3,
+    /// Bytes or Strings that whose length fits in a `u8`.
+    BytesShort = 4,
+    /// Bytes or Strings that whose length fits in a `u16`.
+    BytesMedium = 5,
+    /// Bytes or Strings that whose length fits in a `u32`.
+    BytesLong = 6,
+    /// Lists whose length fits in a `u8`.
+    ListShort = 7,
+    /// Lists whose length fits in a `u16`.
+    ListMedium = 8,
+    /// Lists whose length fits in a `u32`.
+    ListLong = 9,
+    /// Messages with an amonut of fields that fits in a `u8`.
+    MessageShort = 10,
+    /// Messages with an amonut of fields that fits in a `u16`.
+    MessageLong = 11,
+    /// One tag-value pair.
+    OneOf = 12,
+    /// Null.
+    Null = 13,
 }
 
-pub const WIRE_TYPE_MASK: u8 = 0b111;
+pub const WIRE_TYPE_MASK: u8 = 0b1111;
 
 #[derive(Debug)]
 pub struct FieldNumber(pub u16);
 
 impl WireType {
     fn from_byte(b: u8) -> Result<WireType> {
-        match b {
-            0 => Ok(WireType::OneByte),
-            1 => Ok(WireType::TwoByte),
-            2 => Ok(WireType::FourByte),
-            3 => Ok(WireType::EightByte),
-            4 => Ok(WireType::LengthPrefix),
-            5 => Ok(WireType::Null),
-            _ => Err(Error(ErrorKind::InvalidWireType(b))),
-        }
+        WireType::from_repr(b).ok_or(Error(ErrorKind::InvalidWireType(b)))
     }
 }
 
-pub fn read_tag(s: &[u8]) -> Result<(FieldNumber, WireType, &[u8])> {
-    match *s {
-        [a, b, ref rest @ ..] => {
-            let raw_tag = u16::from_le_bytes([a, b]);
-            let field_number = raw_tag >> 3;
-            let wire_type = raw_tag as u8 & WIRE_TYPE_MASK;
-            let wt = WireType::from_byte(wire_type)?;
-            Ok((FieldNumber(field_number), wt, rest))
-        }
-        _ => Err(Error(ErrorKind::NotEnoughBytes)),
-    }
-}
-
-#[derive(Debug, Hash, PartialEq, Eq)]
-pub enum UnknownValue {
-    Null,
-    OneByte(u8),
-    TwoByte(u16),
-    FourByte(u32),
-    EightByte(u64),
-    LengthPrefix(Vec<u8>),
-}
-
-impl Encode for UnknownFields {
-    fn encode_to_buf(&self, buf: &mut Vec<u8>) -> Result<()> {
-        Ok(for (tag, value) in self.0.iter() {
-            write_u16(*tag, buf);
-            match value {
-                UnknownValue::Null => {}
-                UnknownValue::OneByte(b) => write_u8(*b, buf),
-                UnknownValue::TwoByte(b) => write_u16(*b, buf),
-                UnknownValue::FourByte(b) => write_u32(*b, buf),
-                UnknownValue::EightByte(b) => write_u64(*b, buf),
-                UnknownValue::LengthPrefix(b) => write_bytes(b.as_slice(), buf),
-            }
-        })
-    }
-}
-/// A container for fields that were present in the encoded form
-/// but are not known by the decoder.
-#[derive(Debug)]
-pub struct UnknownFields(HashMap<u16, UnknownValue>);
-impl UnknownFields {
-    pub fn insert<'a>(&mut self, field_number: u16, wt: WireType, s: &'a [u8]) -> Result<&'a [u8]> {
-        let tag = field_number << 3 & wt as u16;
-        let (value, rest) = match wt {
-            WireType::OneByte => {
-                let (b, rest) = read_u8(s)?;
-                (UnknownValue::OneByte(b), rest)
-            }
-            WireType::TwoByte => {
-                let (b, rest) = read_u16(s)?;
-                (UnknownValue::TwoByte(b), rest)
-            }
-            WireType::FourByte => {
-                let (b, rest) = read_u32(s)?;
-                (UnknownValue::FourByte(b), rest)
-            }
-            WireType::EightByte => {
-                let (b, rest) = read_u64(s)?;
-                (UnknownValue::EightByte(b), rest)
-            }
-            WireType::LengthPrefix => {
-                let (len, rest) = read_u32(s)?;
-                let (bytes, rest) = read_n(rest, len as usize)?;
-                (UnknownValue::LengthPrefix(bytes.to_vec()), rest)
-            }
-            WireType::Null => (UnknownValue::Null, s),
-        };
-        self.0.insert(tag, value);
-        Ok(rest)
-    }
+pub fn read_tag<R: Read>(mut r: R) -> Result<(FieldNumber, WireType)> {
+    let mut buf = [0u8; 2];
+    r.read_exact(&mut buf)
+        .map_err(|io| Error(ErrorKind::Io(io)))?;
+    let tag = u16::from_le_bytes(buf);
+    let field_number = tag >> 4;
+    let wt = tag as u8 & WIRE_TYPE_MASK;
+    let wt = WireType::from_byte(wt)?;
+    Ok((FieldNumber(field_number), wt))
 }
 
 pub fn read_bool(s: &[u8]) -> Result<(bool, &[u8])> {
@@ -121,145 +74,26 @@ pub fn write_bool(b: bool, buf: &mut Vec<u8>) {
     buf.push(b as u8);
 }
 
-pub fn read_i8(s: &[u8]) -> Result<(i8, &[u8])> {
-    const N: usize = std::mem::size_of::<i8>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((i8::from_le_bytes(buf), rest))
+macro_rules! read_write_as_le {
+    ($($ty:ty),* $(,)?) => {
+        paste::paste! {
+            $(
+                pub fn [<write_ $ty>]<W: Write>(n: $ty, mut w: W) -> Result<()> {
+                    let b = $ty::to_le_bytes(n);
+                    w.write_all(&b).map_err(|e| Error(ErrorKind::Io(e)))?;
+                    Ok(())
+                }
+                pub fn [<read_ $ty>]<R: std::io::Read>(mut r: R) -> Result<$ty> {
+                    let mut buf = [0u8; std::mem::size_of::<$ty>()];
+                    r.read_exact(&mut buf).map_err(|e| Error(ErrorKind::Io(e)))?;
+                    Ok($ty::from_le_bytes(buf))
+                }
+            )*
+        }
+    };
 }
 
-pub fn write_i8(n: i8, buf: &mut Vec<u8>) {
-    buf.push(n as u8);
-}
-
-pub fn read_u8(s: &[u8]) -> Result<(u8, &[u8])> {
-    const N: usize = std::mem::size_of::<i8>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((u8::from_le_bytes(buf), rest))
-}
-
-pub fn write_u8(b: u8, buf: &mut Vec<u8>) {
-    buf.push(b);
-}
-
-pub fn read_i16(s: &[u8]) -> Result<(i16, &[u8])> {
-    const N: usize = std::mem::size_of::<i16>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((i16::from_le_bytes(buf), rest))
-}
-
-pub fn write_i16(n: i16, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_u16(s: &[u8]) -> Result<(u16, &[u8])> {
-    const N: usize = std::mem::size_of::<u16>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((u16::from_le_bytes(buf), rest))
-}
-
-pub fn write_u16(n: u16, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_i32(s: &[u8]) -> Result<(i32, &[u8])> {
-    const N: usize = std::mem::size_of::<i32>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((i32::from_le_bytes(buf), rest))
-}
-
-pub fn write_i32(n: i32, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_u32(s: &[u8]) -> Result<(u32, &[u8])> {
-    const N: usize = std::mem::size_of::<u32>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((u32::from_le_bytes(buf), rest))
-}
-
-pub fn write_u32(n: u32, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_f32(s: &[u8]) -> Result<(f32, &[u8])> {
-    const N: usize = std::mem::size_of::<f32>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((f32::from_le_bytes(buf), rest))
-}
-
-pub fn write_f32(n: f32, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_i64(s: &[u8]) -> Result<(i64, &[u8])> {
-    const N: usize = std::mem::size_of::<i64>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((i64::from_le_bytes(buf), rest))
-}
-
-pub fn write_i64(n: i64, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_u64(s: &[u8]) -> Result<(u64, &[u8])> {
-    const N: usize = std::mem::size_of::<u64>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((u64::from_le_bytes(buf), rest))
-}
-
-pub fn write_u64(n: u64, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
-
-pub fn read_f64(s: &[u8]) -> Result<(f64, &[u8])> {
-    const N: usize = std::mem::size_of::<f64>();
-    let (b, rest) = s
-        .split_at_checked(N)
-        .ok_or(Error(ErrorKind::NotEnoughBytes))?;
-    let mut buf: [u8; N] = Default::default();
-    buf.copy_from_slice(b);
-    Ok((f64::from_le_bytes(buf), rest))
-}
-
-pub fn write_f64(n: f64, buf: &mut Vec<u8>) {
-    buf.extend(n.to_le_bytes())
-}
+read_write_as_le!(u8, i8, u16, i16, u32, i32, f32, u64, i64, f64);
 
 pub fn read_str(s: &[u8], len: usize) -> Result<(&str, &[u8])> {
     let (b, rest) = read_n(s, len)?;
@@ -267,13 +101,22 @@ pub fn read_str(s: &[u8], len: usize) -> Result<(&str, &[u8])> {
     Ok((s, rest))
 }
 
-pub fn write_bytes(s: &[u8], buf: &mut Vec<u8>) {
+pub fn write_bytes<W: Write>(s: &[u8], mut w: W) -> Result<()> {
     if s.len() > u32::MAX as usize {
         panic!("length exceeds u32::MAX");
     }
-    let len = s.len() as u32;
-    write_u32(len, buf);
-    buf.extend(s.iter().copied())
+    let len = s.len();
+    if len < (u8::MAX as usize + 1) {
+        let len = len as u8;
+        write_u8(len, &mut w)?;
+    } else if len < (u16::MAX as usize) + 1 {
+        let len = len as u16;
+        write_u16(len, &mut w)?;
+    } else {
+        write_u32(len as u32, &mut w)?;
+    }
+    w.write_all(s).map_err(|e| Error(ErrorKind::Io(e)))?;
+    Ok(())
 }
 
 pub fn read_n(s: &[u8], len: usize) -> Result<(&[u8], &[u8])> {
@@ -291,6 +134,7 @@ pub enum ErrorKind {
     NotEnoughBytes,
     TooManyBytes,
     InvalidUtf8,
+    Io(IoError),
 }
 
 impl std::error::Error for Error {}
@@ -303,14 +147,19 @@ impl std::fmt::Display for Error {
             ErrorKind::NotEnoughBytes => write!(f, "input too short")?,
             ErrorKind::TooManyBytes => write!(f, "input too long")?,
             ErrorKind::InvalidUtf8 => write!(f, "invalid utf8")?,
+            ErrorKind::Io(ref e) => write!(f, "io error: {}", e)?,
         };
         Ok(())
     }
 }
 
 pub trait Encode {
-    fn encode_to_buf(&self, buf: &mut Vec<u8>) -> Result<()>;
-    fn encode(&self) -> Result<Vec<u8>> {
+    fn encode<W: Write>(&self, w: W) -> Result<()>;
+    fn encode_to_buf(&self, buf: &mut Vec<u8>) -> Result<()> {
+        Encode::encode(self, buf)?;
+        Ok(())
+    }
+    fn encode_to_vec(&self) -> Result<Vec<u8>> {
         let mut buf = vec![];
         self.encode_to_buf(&mut buf)?;
         Ok(buf)
@@ -318,5 +167,15 @@ pub trait Encode {
 }
 
 pub trait Decode: Sized {
-    fn decode(s: &[u8]) -> Result<Self>;
+    fn decode<R: Read>(r: R) -> Result<Self>;
+    fn decode_from_buf(s: &[u8]) -> Result<Self> {
+        let c = std::io::Cursor::new(s);
+        Ok(Decode::decode(c)?)
+    }
+}
+
+impl Encode for redfield_parse::Document {
+    fn encode<W: Write>(&self, w: W) -> Result<()> {
+        todo!()
+    }
 }

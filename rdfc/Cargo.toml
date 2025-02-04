@@ -1,9 +1,8 @@
 [package]
-name = "redfield"
+name = "rdfc"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-paste = "1.0.15"
-strum_macros = "0.26.4"
+redfield = { path = "../redfield" }
 redfield-parse = { path = "../redfield-parse" }

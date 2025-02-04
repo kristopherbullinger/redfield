@@ -1,25 +1,33 @@
-#  Encoding Specification
-Like protobuf, redfield messages are encoded as Tag-Length(?)-Value. A 16-bit integer encodes the data type and field number. The least-significant three bits encode the value type, and the most significant bits, after being shifted right three bytes, indicates the field number.
+# Redfield Encoding Specification
+Like protobuf, redfield messages are encoded as Tag-Length(?)-Value. A 16-bit integer encodes the data type and field number. The least-significant four bits encode the value type, and the most significant bits, after being shifted right four bytes, indicates the field number.
 
-`let field_number = tag >> 3;`
+`let field_number = tag >> 4;`
 
-`let data_type = tag & 0b111;`
+`let wire_type = tag & 0bF;`
 
-|Tag|Wire Type|
+|Wire Type|Description|
 |---|---------|
-|0|bool or u8 or i8||
+|0|bool or u8 or i8|
 |1|u16 or i16 or enum|
 |2|u32 or i32 or f32|
 |3|u64 or i64 or f64|
-|4|string, byte array, message, oneof, or list|
-|5|null|
+|4|string or byte array where length <= 0xFF|
+|5|string or byte array where 0xFF < length <= 0xFFFF|
+|6|string or byte array where 0xFF < length <= 0xFFFFFFFF|
+|7|list where number of items <= 0xFF|
+|8|list where number of items <= 0xFFFF|
+|9|list where number of items <= 0xFFFFFFFF|
+|10|message with 0xFF or fewer tag-value pairs|
+|11|message with 0xFFFF or fewer tag-value pairs|
+|12|oneof|
+|13|null|
 
-Therefore, the maximum number of fields in a single message definition is `u16::MAX >> 3 = 8191`.
+Therefore, the maximum number of fields in a single message definition is `u16::MAX >> 4 = 4095`.
 
 ### Booleans
 Booleans represent `true` or `false`.
 #### Redfield
-Booleans are represented as one-byte value, just like a `u8`. `true` is represented by the value `1` and `false` by the value `0`. A value other than `1` or `0` is not considered compliant.
+Booleans are represented as one-byte value, just like a `u8`. `true` is represented by the value `1` and `false` by the value `0`. A value other than `1` or `0` is considered invalid.
 #### JSON
 Booleans are encoded as the values `true` and `false`.
 
@@ -33,7 +41,7 @@ Booleans are encoded as the values `true` and `false`.
 #### Redfield
 Integers are encoded in little-endian form.
 #### JSON
-Eight-, sixteen-, and 32-bit integers are encoded as JSON numbers. 64-bit integers are encoded as strings.
+8-, 16-, and 32-bit integers are encoded as JSON numbers. 64-bit integers are encoded as strings.
 
 ### Floats
 f32
@@ -68,7 +76,7 @@ message Avatar {
 }
 ```
 #### Redfield
-Byte arrays are represented as a `u32` indicating the length in bytes of the data, followed by the bytes.
+Byte arrays are represented as an unsigned integer indicating the length in bytes of the data, followed by the bytes. The length is indicated with a 1-, 2-, or 4-byte integer depending on the wire type for the field. Refer to the table at the top of this document.
 #### JSON
 Byte arrays are encoded as URL-safe[^1], percent-padded base64 strings.
 
@@ -81,12 +89,12 @@ Strings are represented as JSON strings.
 ### Messages
 A message is a group of key- or tag-value pairs.
 #### Redfield
-Messages are encoded with a u32 indicating the length of the entire message, followed by a zero or more key-value pairs.
+Messages are encoded with an unsigned integer indicating the number of tag-value pairs in the entire message, followed by a zero or more key-value pairs. The number of tag-value pairs is indicated with a 1- or 2-byte integer depending on the wire type. Refer to the table at the top of this document.
 #### JSON
 Messages are represented as JSON objects. The message field names as strings are used as the object keys.
 
 ### OneOfs
-A OneOf is a type which can be exactly one of the types in the definition. It is encoded like a message with one field. It is considered an error if zero or more than one tag-value pairs are present during decoding.
+A OneOf is a type which can be exactly one of the types in the definition.
 ```
 // assume existence of other items named Cat, Dog, and Fish...
 oneof Pet {
@@ -101,9 +109,9 @@ oneof Identifier {
 }
 ````
 #### Redfield 
-OneOfs are encoded just like messages.
+OneOfs are encoded as a single tag-value pair; unlike messages, the length is implicitly 1 and therefore excluded from the encoded form.
 #### JSON
-OneOfs are encoded just like messages.
+OneOfs are encoded as an object with a single field.
 
 ### Lists
 A list is a series of zero or more items. A list's definition may include a size ie `List<u8; 3>`, which indicates that a specific number of items will be present. If a size is specified, it is an error during decoding for the list to have fewer or more values.
@@ -114,7 +122,7 @@ message Pixel {
 }
 ```
 #### Redfield
-Lists are length-prefixed with their length in bytes, NOT the number of items present. A `List<u32>` with 10 items will be prefixed with length 40: 10 (number of items) * 4 (byte width of each item). The encoded form is not affected by the presence of a size in the definition.
+Lists are length-prefixed with the number of items in the list. The length is encoded as a 1-, 2-, or 4-byte unsigned integer depending on the field type. Refer to the table at the top of this document.
 #### JSON
 Lists are encoded as JSON arrays.
 
